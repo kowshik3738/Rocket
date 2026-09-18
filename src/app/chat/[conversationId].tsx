@@ -1,0 +1,379 @@
+import * as DocumentPicker from 'expo-document-picker';
+import { Image } from 'expo-image';
+import * as ImagePicker from 'expo-image-picker';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { VideoView, useVideoPlayer } from 'expo-video';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+
+import { Avatar, Screen, colors } from '@/components/rocket-ui';
+import { useAuth } from '@/providers/auth-provider';
+import { uploadChatFile, uploadChatVideo, uploadPostImage } from '@/services/cloudinary-service';
+import { ChatFile, ChatMessage, Conversation, getConversation, sendMessage, subscribeToMessages } from '@/services/messaging-service';
+import { getProfileColor, getProfileInitials } from '@/services/user-service';
+
+function formatTime(message: ChatMessage) {
+  if (!message.createdAt) return '';
+  return message.createdAt.toDate().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function formatFileSize(size: number | null) {
+  if (size == null) return null;
+  if (size < 1024) return `${size} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = size / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+}
+
+function ChatVideo({ url }: { url: string }) {
+  const player = useVideoPlayer(url, (videoPlayer) => {
+    videoPlayer.loop = false;
+  });
+
+  return <VideoView contentFit="contain" nativeControls player={player} style={videoStyles.player} />;
+}
+
+const videoStyles = StyleSheet.create({
+  player: { width: 220, maxWidth: '100%', height: 160, borderRadius: 12, marginBottom: 8, backgroundColor: '#000' },
+});
+
+type PendingMedia = {
+  kind: 'image' | 'video';
+  asset: ImagePicker.ImagePickerAsset;
+};
+
+export default function ChatScreen() {
+  const { conversationId } = useLocalSearchParams<{ conversationId: string }>();
+  const router = useRouter();
+  const { user } = useAuth();
+  const [conversation, setConversation] = useState<Conversation | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [text, setText] = useState('');
+  const [selectedMedia, setSelectedMedia] = useState<PendingMedia[]>([]);
+  const [selectedFile, setSelectedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [photoViewerUrl, setPhotoViewerUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [sendingProgress, setSendingProgress] = useState<{ current: number; total: number } | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!user || !conversationId) return;
+    let active = true;
+    setLoading(true);
+    setError('');
+    void getConversation(conversationId, user.uid)
+      .then((nextConversation) => {
+        if (!active) return;
+        setConversation(nextConversation);
+        setLoading(false);
+      })
+      .catch((loadError) => {
+        if (!active) return;
+        setError(loadError instanceof Error ? loadError.message : 'This conversation could not be loaded.');
+        setLoading(false);
+      });
+    const unsubscribe = subscribeToMessages(conversationId, setMessages, (messageError) => {
+      if (active) setError(messageError.message || 'Messages could not be loaded.');
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [conversationId, user]);
+
+  async function handlePickMedia() {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      setError('Media library access is required to send photos or videos.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      base64: true,
+      mediaTypes: ['images', 'videos'],
+      allowsMultipleSelection: true,
+      selectionLimit: 0,
+      quality: 0.85,
+    });
+    if (!result.canceled) {
+      if (result.assets.some((asset) => asset.type !== 'image' && asset.type !== 'video')) {
+        setError('One of the selected items could not be identified as a photo or video.');
+        return;
+      }
+      setSelectedMedia(result.assets.map((asset) => ({ kind: asset.type as PendingMedia['kind'], asset })));
+      setSelectedFile(null);
+      setError('');
+    }
+  }
+
+  async function handlePickFile() {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+        type: '*/*',
+      });
+      if (!result.canceled) {
+        const asset = result.assets[0];
+        const uriScheme = asset.uri.split(':', 1)[0];
+        if (uriScheme !== 'file') {
+          throw new Error(`The document picker did not return a local cache file (${uriScheme || 'unknown'} URI).`);
+        }
+        setSelectedFile(asset);
+        setSelectedMedia([]);
+        setError('');
+      }
+    } catch (pickError) {
+      setError(pickError instanceof Error ? pickError.message : 'The selected file could not be prepared for upload.');
+    }
+  }
+
+  function handlePickAttachment() {
+    Alert.alert('Add attachment', 'Choose photos, videos, or a file to send.', [
+      { text: 'Photos & videos', onPress: () => void handlePickMedia() },
+      { text: 'File', onPress: () => void handlePickFile() },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }
+
+  async function handleOpenFile(url: string) {
+    try {
+      if (!await Linking.canOpenURL(url)) {
+        throw new Error('Unsupported file URL.');
+      }
+      await Linking.openURL(url);
+    } catch {
+      setError('This file could not be opened.');
+    }
+  }
+
+  async function handleSend() {
+    if (!conversation || !user || sending) return;
+    const canSendText = !!text.trim();
+    if (!canSendText && selectedMedia.length === 0 && !selectedFile) return;
+    setSending(true);
+    setError('');
+    try {
+      if (selectedMedia.length === 0 && !selectedFile) {
+        await sendMessage(conversation, user.uid, text);
+      } else if (selectedFile) {
+        setSendingProgress({ current: 1, total: 1 });
+        const fileUrl = await uploadChatFile(selectedFile.uri, selectedFile.name);
+        const file: ChatFile = {
+          fileUrl,
+          fileName: selectedFile.name,
+          fileSize: selectedFile.size ?? null,
+          fileMimeType: selectedFile.mimeType ?? null,
+        };
+        await sendMessage(conversation, user.uid, text, null, null, file);
+      } else {
+        const caption = text.trim();
+        for (let index = 0; index < selectedMedia.length; index += 1) {
+          const media = selectedMedia[index];
+          setSendingProgress({ current: index + 1, total: selectedMedia.length });
+          try {
+            const imageUrl = media.kind === 'image' ? await uploadPostImage(media.asset.base64, media.asset.mimeType) : null;
+            const videoUrl = media.kind === 'video' ? await uploadChatVideo(media.asset.uri, media.asset.mimeType, media.asset.fileName) : null;
+            await sendMessage(conversation, user.uid, index === 0 ? caption : '', imageUrl, videoUrl);
+          } catch (batchError) {
+            setSelectedMedia(selectedMedia.slice(index));
+            if (index > 0) setText('');
+            const message = batchError instanceof Error ? batchError.message : 'Message could not be sent.';
+            throw new Error(`Could not send item ${index + 1} of ${selectedMedia.length}: ${message}`);
+          }
+        }
+      }
+      setText('');
+      setSelectedMedia([]);
+      setSelectedFile(null);
+    } catch (sendError) {
+      setError(sendError instanceof Error ? sendError.message : 'Message could not be sent.');
+    } finally {
+      setSendingProgress(null);
+      setSending(false);
+    }
+  }
+
+  const page = StyleSheet.create({
+    container: { flex: 1, backgroundColor: colors.background, paddingTop: 46 },
+    header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: colors.border },
+    back: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.backgroundElement, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+    backIcon: { color: colors.text, fontSize: 29, lineHeight: 29, marginTop: -3 },
+    headerInfo: { marginLeft: 10 },
+    name: { color: colors.text, fontSize: 15, fontWeight: '800' },
+    handle: { color: colors.textSecondary, fontSize: 11, marginTop: 4 },
+    messages: { flexGrow: 1, padding: 20, justifyContent: 'flex-end' },
+    empty: { alignItems: 'center', paddingVertical: 90 },
+    emptyTitle: { color: colors.text, fontSize: 17, fontWeight: '800' },
+    emptyText: { color: colors.textSecondary, fontSize: 13, marginTop: 7 },
+    messageRow: { flexDirection: 'row', justifyContent: 'flex-start', marginBottom: 10 },
+    mineRow: { justifyContent: 'flex-end' },
+    bubble: { maxWidth: '78%', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 18 },
+    theirBubble: { backgroundColor: colors.backgroundElement, borderBottomLeftRadius: 5 },
+    mineBubble: { backgroundColor: colors.accent, borderBottomRightRadius: 5 },
+    messageText: { color: colors.text, fontSize: 15, lineHeight: 20 },
+    mineText: { color: '#FFF' },
+    timestamp: { color: colors.textSecondary, fontSize: 9, marginTop: 5 },
+    mineTimestamp: { color: '#FFE3E5', textAlign: 'right' },
+    messageImage: { width: 220, maxWidth: '100%', height: 220, maxHeight: 260, borderRadius: 12, marginBottom: 8 },
+    previewWrap: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: 1, borderTopColor: colors.border },
+    previewList: { flex: 1 },
+    previewListContent: { gap: 8 },
+    preview: { width: 72, height: 72, borderRadius: 12 },
+    videoPreview: { width: 72, height: 72, borderRadius: 12, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
+    videoPreviewText: { color: '#FFF', fontSize: 12, fontWeight: '800' },
+    filePreview: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
+    fileIcon: { color: colors.accent, fontSize: 22, fontWeight: '800' },
+    fileInfo: { flex: 1 },
+    fileName: { color: colors.text, fontSize: 13, fontWeight: '800' },
+    fileMeta: { color: colors.textSecondary, fontSize: 11, marginTop: 3 },
+    mineFileName: { color: '#FFF' },
+    mineFileMeta: { color: '#FFE3E5' },
+    fileMessage: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8, padding: 10, borderRadius: 12, backgroundColor: 'rgba(0,0,0,0.08)' },
+    remove: { paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.backgroundElement },
+    removeText: { color: colors.accent, fontSize: 12, fontWeight: '700' },
+    selectionCount: { color: colors.textSecondary, fontSize: 12, fontWeight: '700', marginBottom: 6 },
+    sendingStatus: { color: colors.textSecondary, fontSize: 12, paddingHorizontal: 20, paddingTop: 8 },
+    gallery: { width: 38, height: 38, borderRadius: 12, backgroundColor: colors.backgroundElement, alignItems: 'center', justifyContent: 'center' },
+    galleryText: { color: colors.accent, fontSize: 22, lineHeight: 22 },
+    composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 9, padding: 12, borderTopWidth: 1, borderTopColor: colors.border },
+    input: { flex: 1, maxHeight: 100, minHeight: 44, borderRadius: 16, backgroundColor: colors.backgroundElement, color: colors.text, paddingHorizontal: 14, paddingVertical: 11, fontSize: 15 },
+    send: { width: 44, height: 44, borderRadius: 15, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+    sendDisabled: { opacity: 0.45 },
+    sendText: { color: '#FFF', fontSize: 22, fontWeight: '800' },
+    state: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28 },
+    stateText: { color: colors.textSecondary, fontSize: 13, marginTop: 10 },
+    error: { color: colors.accent, textAlign: 'center', fontSize: 13, lineHeight: 19, paddingHorizontal: 20, paddingVertical: 8 },
+    backLink: { color: colors.accent, fontWeight: '800', marginTop: 16 },
+    viewer: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
+    viewerImage: { width: '100%', height: '100%' },
+    close: { position: 'absolute', top: 52, right: 20, zIndex: 2, width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+    closeText: { color: '#FFF', fontSize: 22, fontWeight: '800' },
+  });
+
+  if (loading) {
+    return <Screen scroll={false}><View style={page.state}><ActivityIndicator color={colors.accent} /><Text style={page.stateText}>Loading conversation...</Text></View></Screen>;
+  }
+  if (!conversation || !conversation.otherUser) {
+    return <Screen scroll={false}><View style={page.state}><Text style={page.error}>{error || 'This conversation is unavailable.'}</Text><Pressable onPress={() => router.back()}><Text style={page.backLink}>Go back</Text></Pressable></View></Screen>;
+  }
+
+  const otherUser = conversation.otherUser;
+  const avatar = { initials: getProfileInitials(otherUser.displayName), color: getProfileColor(otherUser.uid) };
+
+  return (
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={page.container}>
+      <View style={page.header}>
+        <Pressable onPress={() => router.back()} style={page.back}>
+          <Text style={page.backIcon}>‹</Text>
+        </Pressable>
+        <Avatar user={avatar} size={42} />
+        <View style={page.headerInfo}>
+          <Text style={page.name}>{otherUser.displayName}</Text>
+          <Text style={page.handle}>@{otherUser.username}</Text>
+        </View>
+      </View>
+
+      <ScrollView contentContainerStyle={page.messages} showsVerticalScrollIndicator={false}>
+        {messages.length === 0 ? (
+          <View style={page.empty}>
+            <Text style={page.emptyTitle}>Start your conversation</Text>
+            <Text style={page.emptyText}>Send a message to {otherUser.displayName}.</Text>
+          </View>
+        ) : (
+          messages.map((message) => {
+            const mine = message.senderId === user?.uid;
+            const fileUrl = message.fileUrl;
+            return (
+              <View key={message.id} style={[page.messageRow, mine && page.mineRow]}>
+                <View style={[page.bubble, mine ? page.mineBubble : page.theirBubble]}>
+                  {message.imageUrl ? (
+                    <Pressable onPress={() => setPhotoViewerUrl(message.imageUrl)}>
+                      <Image contentFit="contain" source={message.imageUrl} style={page.messageImage} />
+                    </Pressable>
+                  ) : null}
+                  {message.videoUrl ? <ChatVideo url={message.videoUrl} /> : null}
+                  {fileUrl ? (
+                    <Pressable onPress={() => void handleOpenFile(fileUrl)} style={page.fileMessage}>
+                      <Text style={page.fileIcon}>▣</Text>
+                      <View style={page.fileInfo}>
+                        <Text numberOfLines={1} style={[page.fileName, mine && page.mineFileName]}>{message.fileName || 'File'}</Text>
+                        {formatFileSize(message.fileSize) ? <Text style={[page.fileMeta, mine && page.mineFileMeta]}>{formatFileSize(message.fileSize)}</Text> : null}
+                      </View>
+                    </Pressable>
+                  ) : null}
+                  {message.text ? <Text style={[page.messageText, mine && page.mineText]}>{message.text}</Text> : null}
+                  <Text style={[page.timestamp, mine && page.mineTimestamp]}>{formatTime(message)}</Text>
+                </View>
+              </View>
+            );
+          })
+        )}
+      </ScrollView>
+
+      {error ? <Text style={page.error}>{error}</Text> : null}
+      {sendingProgress ? <Text style={page.sendingStatus}>Sending item {sendingProgress.current} of {sendingProgress.total}…</Text> : null}
+
+      <Modal animationType="fade" visible={!!photoViewerUrl} transparent={false} onRequestClose={() => setPhotoViewerUrl(null)}>
+        <View style={page.viewer}>
+          <Pressable onPress={() => setPhotoViewerUrl(null)} style={page.close}>
+            <Text style={page.closeText}>X</Text>
+          </Pressable>
+          {photoViewerUrl ? <Image contentFit="contain" source={photoViewerUrl} style={page.viewerImage} /> : null}
+        </View>
+      </Modal>
+
+      {selectedMedia.length > 0 ? (
+        <View style={page.previewWrap}>
+          <View style={page.previewList}>
+            <Text style={page.selectionCount}>{selectedMedia.length} item{selectedMedia.length === 1 ? '' : 's'} selected</Text>
+            <ScrollView contentContainerStyle={page.previewListContent} horizontal showsHorizontalScrollIndicator={false}>
+              {selectedMedia.map((media, index) => media.kind === 'image' ? (
+                <Image contentFit="cover" key={`${media.asset.uri}_${index}`} source={media.asset.uri} style={page.preview} />
+              ) : (
+                <View key={`${media.asset.uri}_${index}`} style={page.videoPreview}><Text style={page.videoPreviewText}>▶ Video</Text></View>
+              ))}
+            </ScrollView>
+          </View>
+          <Pressable disabled={sending} onPress={() => setSelectedMedia([])} style={page.remove}>
+            <Text style={page.removeText}>Remove all</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {selectedFile ? (
+        <View style={page.previewWrap}>
+          <View style={page.filePreview}>
+            <Text style={page.fileIcon}>▣</Text>
+            <View style={page.fileInfo}>
+              <Text numberOfLines={1} style={page.fileName}>{selectedFile.name}</Text>
+              {formatFileSize(selectedFile.size ?? null) ? <Text style={page.fileMeta}>{formatFileSize(selectedFile.size ?? null)}</Text> : null}
+            </View>
+          </View>
+          <Pressable disabled={sending} onPress={() => setSelectedFile(null)} style={page.remove}>
+            <Text style={page.removeText}>Remove</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      <View style={page.composer}>
+        <Pressable disabled={sending} onPress={handlePickAttachment} style={page.gallery}>
+          <Text style={page.galleryText}>＋</Text>
+        </Pressable>
+        <TextInput editable={!sending} multiline onChangeText={setText} placeholder="Write a message..." placeholderTextColor={colors.textSecondary} style={page.input} value={text} />
+        <Pressable
+          disabled={(!text.trim() && selectedMedia.length === 0 && !selectedFile) || sending}
+          onPress={() => void handleSend()}
+          style={[page.send, ((!text.trim() && selectedMedia.length === 0 && !selectedFile) || sending) && page.sendDisabled]}
+        >
+          <Text style={page.sendText}>{sending ? '…' : '↑'}</Text>
+        </Pressable>
+      </View>
+    </KeyboardAvoidingView>
+  );
+}

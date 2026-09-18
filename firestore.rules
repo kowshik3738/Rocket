@@ -1,0 +1,250 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          'uid', 'displayName', 'username', 'usernameLower', 'bio', 'createdAt'
+        ])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() > 0
+        && request.resource.data.username is string
+        && request.resource.data.usernameLower is string
+        && request.resource.data.bio is string
+        && request.resource.data.bio.size() <= 150
+        && request.resource.data.usernameLower.matches('^[a-z0-9_.]{3,30}$')
+        && request.resource.data.usernameLower == request.resource.data.username.lower();
+      allow update: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() > 0
+        && request.resource.data.username is string
+        && request.resource.data.usernameLower is string
+        && request.resource.data.usernameLower.matches('^[a-z0-9_.]{3,30}$')
+        && request.resource.data.usernameLower == request.resource.data.username.lower()
+        && request.resource.data.bio is string
+        && request.resource.data.bio.size() <= 150
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.keys().hasOnly([
+          'uid', 'displayName', 'username', 'usernameLower', 'bio', 'createdAt'
+        ])
+        && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.usernameLower)).data.uid == request.auth.uid
+        && (request.resource.data.usernameLower == resource.data.usernameLower
+          || !existsAfter(/databases/$(database)/documents/usernames/$(resource.data.usernameLower)));
+      allow delete: if false;
+    }
+
+    match /usernames/{usernameLower} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && usernameLower.matches('^[a-z0-9_.]{3,30}$')
+        && usernameLower == usernameLower.lower()
+        && request.resource.data.keys().hasOnly(['uid'])
+        && request.resource.data.uid == request.auth.uid;
+      allow update: if false;
+      allow delete: if request.auth != null
+        && resource.data.uid == request.auth.uid;
+    }
+
+    match /friendRequests/{requestId} {
+      allow read: if request.auth != null
+        && (resource == null || resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['senderId', 'recipientId', 'status', 'createdAt'])
+        && requestId == request.resource.data.senderId + '_' + request.resource.data.recipientId
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.recipientId != request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt is timestamp;
+      allow update: if request.auth != null
+        && resource.data.recipientId == request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          'senderId', 'recipientId', 'status', 'createdAt', 'acceptedAt', 'declinedAt'
+        ])
+        && request.resource.data.senderId == resource.data.senderId
+        && request.resource.data.recipientId == resource.data.recipientId
+        && request.resource.data.createdAt == resource.data.createdAt
+        && resource.data.status == 'pending'
+        && ((request.resource.data.status == 'accepted'
+          && request.resource.data.acceptedAt is timestamp
+          && !request.resource.data.keys().hasAny(['declinedAt']))
+          || (request.resource.data.status == 'declined'
+          && request.resource.data.declinedAt is timestamp
+          && !request.resource.data.keys().hasAny(['acceptedAt'])));
+      allow delete: if false;
+    }
+
+    match /friendships/{friendshipId} {
+      allow read: if request.auth != null
+        && (resource == null || resource.data.userA == request.auth.uid || resource.data.userB == request.auth.uid);
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['userA', 'userB', 'requestId', 'createdAt'])
+        && ((request.resource.data.userA < request.resource.data.userB
+          && friendshipId == request.resource.data.userA + '_' + request.resource.data.userB)
+          || (request.resource.data.userB < request.resource.data.userA
+          && friendshipId == request.resource.data.userB + '_' + request.resource.data.userA))
+        && request.resource.data.userA != request.resource.data.userB
+        && (request.auth.uid == request.resource.data.userA || request.auth.uid == request.resource.data.userB)
+        && request.resource.data.createdAt is timestamp
+        && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.status == 'accepted'
+        && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.senderId == request.resource.data.userA
+        && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.recipientId == request.resource.data.userB;
+      allow update, delete: if false;
+    }
+
+    match /userFriends/{friendshipId} {
+      allow read: if request.auth != null && resource.data.ownerId == request.auth.uid;
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['ownerId', 'friendId', 'requestId', 'createdAt'])
+        && friendshipId == request.resource.data.ownerId + '_' + request.resource.data.friendId
+        && request.resource.data.ownerId != request.resource.data.friendId
+        && (request.auth.uid == request.resource.data.ownerId || request.auth.uid == request.resource.data.friendId)
+        && request.resource.data.createdAt is timestamp
+        && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.status == 'accepted'
+        && ((getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.senderId == request.resource.data.ownerId
+          && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.recipientId == request.resource.data.friendId)
+          || (getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.senderId == request.resource.data.friendId
+          && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.recipientId == request.resource.data.ownerId));
+      allow update, delete: if false;
+    }
+
+    match /conversations/{conversationId} {
+      allow read: if request.auth != null
+        && (resource == null || resource.data.participantA == request.auth.uid || resource.data.participantB == request.auth.uid);
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly([
+          'participantA', 'participantB', 'createdAt', 'lastMessage', 'lastMessageAt', 'lastMessageSenderId'
+        ])
+        && request.resource.data.participantA != request.resource.data.participantB
+        && ((request.resource.data.participantA < request.resource.data.participantB
+          && conversationId == request.resource.data.participantA + '_' + request.resource.data.participantB)
+          || (request.resource.data.participantB < request.resource.data.participantA
+          && conversationId == request.resource.data.participantB + '_' + request.resource.data.participantA))
+        && (request.auth.uid == request.resource.data.participantA || request.auth.uid == request.resource.data.participantB)
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.lastMessage == null
+        && request.resource.data.lastMessageAt == null
+        && request.resource.data.lastMessageSenderId == null
+        && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA != null
+        && ((get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA == request.resource.data.participantA
+          && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userB == request.resource.data.participantB)
+          || (get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA == request.resource.data.participantB
+          && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userB == request.resource.data.participantA));
+      allow update: if request.auth != null
+        && (resource.data.participantA == request.auth.uid || resource.data.participantB == request.auth.uid)
+        && request.resource.data.keys().hasOnly([
+          'participantA', 'participantB', 'createdAt', 'lastMessage', 'lastMessageAt', 'lastMessageSenderId'
+        ])
+        && request.resource.data.participantA == resource.data.participantA
+        && request.resource.data.participantB == resource.data.participantB
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.lastMessage is string
+        && request.resource.data.lastMessage.size() > 0
+        && request.resource.data.lastMessageAt is timestamp
+        && request.resource.data.lastMessageSenderId == request.auth.uid;
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if request.auth != null
+          && (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
+            || get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid);
+        allow create: if request.auth != null
+          && request.resource.data.keys().hasOnly([
+            'senderId', 'recipientId', 'text', 'imageUrl', 'videoUrl',
+            'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'createdAt'
+          ])
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.createdAt is timestamp
+          && ((request.resource.data.text.size() > 0
+              && !request.resource.data.keys().hasAny([
+                'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType'
+              ]))
+            || (request.resource.data.keys().hasAny(['imageUrl'])
+              && !request.resource.data.keys().hasAny([
+                'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType'
+              ])
+              && request.resource.data.imageUrl is string
+              && request.resource.data.imageUrl.matches('^https://.*$')
+              && request.resource.data.text.size() >= 0)
+            || (request.resource.data.keys().hasAny(['videoUrl'])
+              && !request.resource.data.keys().hasAny([
+                'imageUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType'
+              ])
+              && request.resource.data.videoUrl is string
+              && request.resource.data.videoUrl.matches('^https://.*$')
+              && request.resource.data.text.size() >= 0)
+            || (request.resource.data.keys().hasAll(['fileUrl', 'fileName'])
+              && !request.resource.data.keys().hasAny(['imageUrl', 'videoUrl'])
+              && request.resource.data.fileUrl is string
+              && request.resource.data.fileUrl.matches('^https://.*$')
+              && request.resource.data.fileName is string
+              && request.resource.data.fileName.size() > 0
+              && (!request.resource.data.keys().hasAny(['fileSize'])
+                || (request.resource.data.fileSize is int
+                  && request.resource.data.fileSize >= 0))
+              && (!request.resource.data.keys().hasAny(['fileMimeType'])
+                || (request.resource.data.fileMimeType is string
+                  && request.resource.data.fileMimeType.size() > 0))
+              && request.resource.data.text.size() >= 0))
+          && ((get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
+            && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.resource.data.recipientId)
+            || (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid
+            && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.resource.data.recipientId));
+        allow update, delete: if false;
+      }
+    }
+
+    match /posts/{postId} {
+      allow read: if request.auth != null
+        && (resource.data.authorUid == request.auth.uid
+          || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + resource.data.authorUid)));
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['authorUid', 'text', 'imageUrl', 'createdAt'])
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.text is string
+        && request.resource.data.text.size() <= 1000
+        && (!request.resource.data.keys().hasAny(['imageUrl'])
+          || (request.resource.data.imageUrl is string
+            && request.resource.data.imageUrl.matches('^https://[^ ]+$')))
+        && (request.resource.data.text.size() > 0
+          || request.resource.data.keys().hasAny(['imageUrl']))
+        && request.resource.data.createdAt is timestamp;
+      allow update: if false;
+      allow delete: if request.auth != null
+        && resource.data.authorUid == request.auth.uid;
+
+      match /likes/{userId} {
+        allow read: if request.auth != null
+          && (get(/databases/$(database)/documents/posts/$(postId)).data.authorUid == request.auth.uid
+            || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + get(/databases/$(database)/documents/posts/$(postId)).data.authorUid)));
+        allow create: if request.auth != null
+          && userId == request.auth.uid
+          && request.resource.data.keys().hasOnly(['userUid', 'createdAt'])
+          && request.resource.data.userUid == request.auth.uid
+          && request.resource.data.createdAt is timestamp;
+        allow delete: if request.auth != null && userId == request.auth.uid;
+        allow update: if false;
+      }
+
+      match /comments/{commentId} {
+        allow read: if request.auth != null
+          && (get(/databases/$(database)/documents/posts/$(postId)).data.authorUid == request.auth.uid
+            || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + get(/databases/$(database)/documents/posts/$(postId)).data.authorUid)));
+        allow create: if request.auth != null
+          && request.resource.data.keys().hasOnly(['authorUid', 'text', 'createdAt'])
+          && request.resource.data.authorUid == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 500
+          && request.resource.data.createdAt is timestamp;
+        allow update, delete: if request.auth != null && resource.data.authorUid == request.auth.uid;
+      }
+    }
+  }
+}
