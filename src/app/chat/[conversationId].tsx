@@ -1,10 +1,13 @@
 import * as DocumentPicker from 'expo-document-picker';
+import { Directory, File, Paths } from 'expo-file-system';
+import * as FileSystemLegacy from 'expo-file-system/legacy';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import * as IntentLauncher from 'expo-intent-launcher';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { Avatar, Screen, colors } from '@/components/rocket-ui';
 import { useAuth } from '@/providers/auth-provider';
@@ -28,6 +31,57 @@ function formatFileSize(size: number | null) {
     unit += 1;
   }
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+}
+
+function fileCacheKey(url: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < url.length; index += 1) {
+    hash ^= url.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function safeFileName(name: string | null | undefined) {
+  const normalized = name?.normalize('NFC').replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').trim().replace(/[. ]+$/g, '');
+  if (!normalized || normalized === '.' || normalized === '..') return 'attachment';
+
+  // Keep the file extension when shortening a name for a safe cache path.
+  if (normalized.length <= 120) return normalized;
+  const extension = normalized.match(/(\.[^.]+)$/)?.[1] ?? '';
+  return `${normalized.slice(0, Math.max(1, 120 - extension.length))}${extension}`;
+}
+
+const MIME_TYPES_BY_EXTENSION: Record<string, string> = {
+  csv: 'text/csv',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pdf: 'application/pdf',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  rtf: 'application/rtf',
+  txt: 'text/plain',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  zip: 'application/zip',
+};
+
+function resolveFileMimeType(name: string, storedMimeType: string | null | undefined) {
+  const mimeType = storedMimeType?.trim().toLowerCase();
+  const isSpecificMimeType = !!mimeType
+    && mimeType !== '*/*'
+    && mimeType !== 'application/octet-stream'
+    && mimeType !== 'application/unknown'
+    && /^[-\w.+]+\/[-\w.+]+$/.test(mimeType);
+  if (isSpecificMimeType) return mimeType;
+
+  const extension = name.match(/\.([^.]+)$/)?.[1]?.toLowerCase();
+  return extension ? MIME_TYPES_BY_EXTENSION[extension] ?? 'application/octet-stream' : 'application/octet-stream';
+}
+
+function redactFileOpenError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/https?:\/\/\S+/g, '[remote URL]');
 }
 
 function ChatVideo({ url }: { url: string }) {
@@ -61,6 +115,8 @@ export default function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [sendingProgress, setSendingProgress] = useState<{ current: number; total: number } | null>(null);
   const [error, setError] = useState('');
+  const openingFileUrls = useRef(new Set<string>());
+  const [openingFileUrl, setOpeningFileUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user || !conversationId) return;
@@ -141,14 +197,60 @@ export default function ChatScreen() {
     ]);
   }
 
-  async function handleOpenFile(url: string) {
+  async function handleOpenFile(url: string, name?: string | null, mimeType?: string | null) {
+    if (Platform.OS !== 'android' || openingFileUrls.current.has(url)) return;
+
+    openingFileUrls.current.add(url);
+    setOpeningFileUrl(url);
+    setError('');
+    const fileName = safeFileName(name);
+    const resolvedMimeType = resolveFileMimeType(fileName, mimeType);
+    let stage = 'cache setup';
+    let usedCachedFile = false;
     try {
-      if (!await Linking.canOpenURL(url)) {
-        throw new Error('Unsupported file URL.');
+      const directory = new Directory(Paths.cache, 'chat-files', fileCacheKey(url));
+      directory.create({ idempotent: true, intermediates: true });
+      const localFile = new File(directory, fileName);
+      usedCachedFile = localFile.exists;
+
+      if (!usedCachedFile) {
+        stage = 'download';
+        try {
+          await File.downloadFileAsync(url, localFile);
+        } catch (downloadError) {
+          // Android can leave a partial file behind when a streamed download fails.
+          if (localFile.exists) {
+            try {
+              localFile.delete();
+            } catch {
+              // A stale cache entry is non-fatal; the original download error is more useful.
+            }
+          }
+          throw downloadError;
+        }
       }
-      await Linking.openURL(url);
-    } catch {
-      setError('This file could not be opened.');
+
+      stage = 'content URI creation';
+      const contentUri = await FileSystemLegacy.getContentUriAsync(localFile.uri);
+      stage = 'Android viewer launch';
+      await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+        data: contentUri,
+        // Android FLAG_GRANT_READ_URI_PERMISSION lets the selected viewer read Expo's content URI.
+        flags: 1,
+        type: resolvedMimeType,
+      });
+    } catch (openError) {
+      console.error('[Rocket file open] failed', {
+        stage,
+        error: redactFileOpenError(openError),
+        mimeType: resolvedMimeType,
+        extension: fileName.match(/\.([^.]+)$/)?.[1]?.toLowerCase() ?? 'none',
+        usedCachedFile,
+      });
+      setError('This file could not be opened. Check your connection and install a compatible app.');
+    } finally {
+      openingFileUrls.current.delete(url);
+      setOpeningFileUrl((current) => current === url ? null : current);
     }
   }
 
@@ -299,11 +401,11 @@ export default function ChatScreen() {
                   ) : null}
                   {message.videoUrl ? <ChatVideo url={message.videoUrl} /> : null}
                   {fileUrl ? (
-                    <Pressable onPress={() => void handleOpenFile(fileUrl)} style={page.fileMessage}>
+                    <Pressable disabled={openingFileUrl === fileUrl} onPress={() => void handleOpenFile(fileUrl, message.fileName, message.fileMimeType)} style={page.fileMessage}>
                       <Text style={page.fileIcon}>▣</Text>
                       <View style={page.fileInfo}>
                         <Text numberOfLines={1} style={[page.fileName, mine && page.mineFileName]}>{message.fileName || 'File'}</Text>
-                        {formatFileSize(message.fileSize) ? <Text style={[page.fileMeta, mine && page.mineFileMeta]}>{formatFileSize(message.fileSize)}</Text> : null}
+                        <Text style={[page.fileMeta, mine && page.mineFileMeta]}>{openingFileUrl === fileUrl ? 'Opening...' : formatFileSize(message.fileSize) || 'File'}</Text>
                       </View>
                     </Pressable>
                   ) : null}
