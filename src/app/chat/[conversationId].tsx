@@ -5,6 +5,7 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import * as IntentLauncher from 'expo-intent-launcher';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { usePreventScreenCapture } from 'expo-screen-capture';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
@@ -12,7 +13,7 @@ import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressa
 import { Avatar, Screen, colors } from '@/components/rocket-ui';
 import { useAuth } from '@/providers/auth-provider';
 import { uploadChatFile, uploadChatVideo, uploadPostImage } from '@/services/cloudinary-service';
-import { ChatFile, ChatMessage, Conversation, getConversation, sendMessage, subscribeToMessages } from '@/services/messaging-service';
+import { ChatFile, ChatMessage, Conversation, getConversation, markViewOnceMessageViewed, sendMessage, subscribeToMessages } from '@/services/messaging-service';
 import { getProfileColor, getProfileInitials } from '@/services/user-service';
 
 function formatTime(message: ChatMessage) {
@@ -92,8 +93,55 @@ function ChatVideo({ url }: { url: string }) {
   return <VideoView contentFit="contain" nativeControls player={player} style={videoStyles.player} />;
 }
 
+function ViewOnceVideo({ url, onAvailable }: { url: string; onAvailable: () => void }) {
+  const player = useVideoPlayer(url, (videoPlayer) => {
+    videoPlayer.loop = false;
+  });
+
+  return <VideoView contentFit="contain" nativeControls onFirstFrameRender={onAvailable} player={player} style={viewOnceStyles.media} />;
+}
+
+function ViewOnceViewer({ message, onClose, onAvailable }: { message: ChatMessage; onClose: () => void; onAvailable: () => void }) {
+  // The hook releases Android FLAG_SECURE when this dedicated viewer unmounts.
+  usePreventScreenCapture(`rocket-view-once-${message.id}`);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [mediaAvailable, setMediaAvailable] = useState(false);
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setLoadFailed((failed) => mediaAvailable ? failed : true);
+    }, 15000);
+    return () => clearTimeout(timeout);
+  }, [mediaAvailable]);
+  const handleAvailable = () => {
+    setMediaAvailable(true);
+    onAvailable();
+  };
+
+  return (
+    <Modal animationType="fade" visible transparent={false} onRequestClose={onClose}>
+      <View style={viewOnceStyles.viewer}>
+        <Pressable accessibilityLabel="Close view once media" onPress={onClose} style={viewOnceStyles.close}>
+          <Text style={viewOnceStyles.closeText}>X</Text>
+        </Pressable>
+        {message.imageUrl ? <Image contentFit="contain" onError={() => setLoadFailed(true)} onLoad={handleAvailable} source={message.imageUrl} style={viewOnceStyles.media} /> : null}
+        {message.videoUrl ? <ViewOnceVideo onAvailable={handleAvailable} url={message.videoUrl} /> : null}
+        {loadFailed ? <Text style={viewOnceStyles.error}>This media could not be loaded.</Text> : !mediaAvailable ? <View pointerEvents="none" style={viewOnceStyles.loading}><ActivityIndicator color="#FFF" /></View> : null}
+      </View>
+    </Modal>
+  );
+}
+
 const videoStyles = StyleSheet.create({
   player: { width: 220, maxWidth: '100%', height: 160, borderRadius: 12, marginBottom: 8, backgroundColor: '#000' },
+});
+
+const viewOnceStyles = StyleSheet.create({
+  viewer: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
+  media: { width: '100%', height: '100%', backgroundColor: '#000' },
+  close: { position: 'absolute', top: 52, right: 20, zIndex: 2, width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+  closeText: { color: '#FFF', fontSize: 22, fontWeight: '800' },
+  loading: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
+  error: { position: 'absolute', bottom: 70, color: '#FFF', fontSize: 14 },
 });
 
 type PendingMedia = {
@@ -110,13 +158,17 @@ export default function ChatScreen() {
   const [text, setText] = useState('');
   const [selectedMedia, setSelectedMedia] = useState<PendingMedia[]>([]);
   const [selectedFile, setSelectedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [sendMediaViewOnce, setSendMediaViewOnce] = useState(false);
   const [photoViewerUrl, setPhotoViewerUrl] = useState<string | null>(null);
+  const [viewOnceMessage, setViewOnceMessage] = useState<ChatMessage | null>(null);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [sendingProgress, setSendingProgress] = useState<{ current: number; total: number } | null>(null);
   const [error, setError] = useState('');
   const openingFileUrls = useRef(new Set<string>());
   const [openingFileUrl, setOpeningFileUrl] = useState<string | null>(null);
+  const openingViewOnceIds = useRef(new Set<string>());
+  const viewOnceAvailable = useRef(false);
 
   useEffect(() => {
     if (!user || !conversationId) return;
@@ -163,6 +215,7 @@ export default function ChatScreen() {
       }
       setSelectedMedia(result.assets.map((asset) => ({ kind: asset.type as PendingMedia['kind'], asset })));
       setSelectedFile(null);
+      setSendMediaViewOnce(false);
       setError('');
     }
   }
@@ -182,10 +235,35 @@ export default function ChatScreen() {
         }
         setSelectedFile(asset);
         setSelectedMedia([]);
+        setSendMediaViewOnce(false);
         setError('');
       }
     } catch (pickError) {
       setError(pickError instanceof Error ? pickError.message : 'The selected file could not be prepared for upload.');
+    }
+  }
+
+  function handleOpenViewOnce(message: ChatMessage) {
+    if (!user || message.senderId === user.uid || message.viewedAt || openingViewOnceIds.current.has(message.id)) return;
+    openingViewOnceIds.current.add(message.id);
+    viewOnceAvailable.current = false;
+    setError('');
+    setViewOnceMessage(message);
+  }
+
+  function closeViewOnceViewer() {
+    if (viewOnceMessage) openingViewOnceIds.current.delete(viewOnceMessage.id);
+    setViewOnceMessage(null);
+  }
+
+  async function handleViewOnceAvailable() {
+    if (!viewOnceMessage || viewOnceAvailable.current || !user) return;
+    viewOnceAvailable.current = true;
+    try {
+      await markViewOnceMessageViewed(conversationId, viewOnceMessage.id, user.uid);
+    } catch {
+      setError('This view-once media could not be opened.');
+      closeViewOnceViewer();
     }
   }
 
@@ -281,7 +359,7 @@ export default function ChatScreen() {
           try {
             const imageUrl = media.kind === 'image' ? await uploadPostImage(media.asset.base64, media.asset.mimeType) : null;
             const videoUrl = media.kind === 'video' ? await uploadChatVideo(media.asset.uri, media.asset.mimeType, media.asset.fileName) : null;
-            await sendMessage(conversation, user.uid, index === 0 ? caption : '', imageUrl, videoUrl);
+            await sendMessage(conversation, user.uid, index === 0 ? caption : '', imageUrl, videoUrl, null, sendMediaViewOnce);
           } catch (batchError) {
             setSelectedMedia(selectedMedia.slice(index));
             if (index > 0) setText('');
@@ -293,6 +371,7 @@ export default function ChatScreen() {
       setText('');
       setSelectedMedia([]);
       setSelectedFile(null);
+      setSendMediaViewOnce(false);
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : 'Message could not be sent.');
     } finally {
@@ -340,6 +419,16 @@ export default function ChatScreen() {
     remove: { paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.backgroundElement },
     removeText: { color: colors.accent, fontSize: 12, fontWeight: '700' },
     selectionCount: { color: colors.textSecondary, fontSize: 12, fontWeight: '700', marginBottom: 6 },
+    viewOnceToggle: { alignSelf: 'flex-start', marginTop: 8, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, backgroundColor: colors.backgroundElement },
+    viewOnceToggleActive: { backgroundColor: colors.accent },
+    viewOnceToggleText: { color: colors.accent, fontSize: 12, fontWeight: '800' },
+    viewOnceToggleTextActive: { color: '#FFF' },
+    viewOnceCard: { minWidth: 170, minHeight: 92, alignItems: 'center', justifyContent: 'center', gap: 5, marginBottom: 8, borderRadius: 12, backgroundColor: 'rgba(0,0,0,0.12)' },
+    viewOnceIcon: { color: colors.accent, fontSize: 24, fontWeight: '800' },
+    viewOnceTitle: { color: colors.text, fontSize: 14, fontWeight: '800' },
+    viewOnceDetail: { color: colors.textSecondary, fontSize: 11 },
+    mineViewOnceTitle: { color: '#FFF' },
+    mineViewOnceDetail: { color: '#FFE3E5' },
     sendingStatus: { color: colors.textSecondary, fontSize: 12, paddingHorizontal: 20, paddingTop: 8 },
     gallery: { width: 38, height: 38, borderRadius: 12, backgroundColor: colors.backgroundElement, alignItems: 'center', justifyContent: 'center' },
     galleryText: { color: colors.accent, fontSize: 22, lineHeight: 22 },
@@ -391,10 +480,22 @@ export default function ChatScreen() {
           messages.map((message) => {
             const mine = message.senderId === user?.uid;
             const fileUrl = message.fileUrl;
+            const viewOnceState = message.viewedAt ? 'Opened' : mine ? 'View once' : `View ${message.imageUrl ? 'photo' : 'video'}`;
             return (
               <View key={message.id} style={[page.messageRow, mine && page.mineRow]}>
                 <View style={[page.bubble, mine ? page.mineBubble : page.theirBubble]}>
-                  {message.imageUrl ? (
+                  {message.viewOnce ? (
+                    <Pressable
+                      accessibilityLabel={viewOnceState}
+                      disabled={mine || !!message.viewedAt || openingViewOnceIds.current.has(message.id)}
+                      onPress={() => handleOpenViewOnce(message)}
+                      style={page.viewOnceCard}
+                    >
+                      <Text style={page.viewOnceIcon}>{message.viewedAt ? '✓' : '◉'}</Text>
+                      <Text style={[page.viewOnceTitle, mine && page.mineViewOnceTitle]}>{viewOnceState}</Text>
+                      <Text style={[page.viewOnceDetail, mine && page.mineViewOnceDetail]}>{message.viewedAt ? 'No longer available' : mine ? 'Waiting to be opened' : 'Tap to open'}</Text>
+                    </Pressable>
+                  ) : message.imageUrl ? (
                     <Pressable onPress={() => setPhotoViewerUrl(message.imageUrl)}>
                       <Image contentFit="contain" source={message.imageUrl} style={page.messageImage} />
                     </Pressable>
@@ -430,6 +531,8 @@ export default function ChatScreen() {
         </View>
       </Modal>
 
+      {viewOnceMessage ? <ViewOnceViewer message={viewOnceMessage} onAvailable={() => void handleViewOnceAvailable()} onClose={closeViewOnceViewer} /> : null}
+
       {selectedMedia.length > 0 ? (
         <View style={page.previewWrap}>
           <View style={page.previewList}>
@@ -441,8 +544,17 @@ export default function ChatScreen() {
                 <View key={`${media.asset.uri}_${index}`} style={page.videoPreview}><Text style={page.videoPreviewText}>▶ Video</Text></View>
               ))}
             </ScrollView>
+            <Pressable
+              accessibilityRole="switch"
+              accessibilityState={{ checked: sendMediaViewOnce }}
+              disabled={sending}
+              onPress={() => setSendMediaViewOnce((current) => !current)}
+              style={[page.viewOnceToggle, sendMediaViewOnce && page.viewOnceToggleActive]}
+            >
+              <Text style={[page.viewOnceToggleText, sendMediaViewOnce && page.viewOnceToggleTextActive]}>◉ {sendMediaViewOnce ? 'View once on' : 'Send as view once'}</Text>
+            </Pressable>
           </View>
-          <Pressable disabled={sending} onPress={() => setSelectedMedia([])} style={page.remove}>
+          <Pressable disabled={sending} onPress={() => { setSelectedMedia([]); setSendMediaViewOnce(false); }} style={page.remove}>
             <Text style={page.removeText}>Remove all</Text>
           </Pressable>
         </View>

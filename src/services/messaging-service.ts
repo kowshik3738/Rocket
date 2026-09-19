@@ -36,6 +36,8 @@ export type ChatMessage = {
   fileName: string | null;
   fileSize: number | null;
   fileMimeType: string | null;
+  viewOnce: boolean;
+  viewedAt: Timestamp | null;
   createdAt: Timestamp | null;
 };
 
@@ -196,6 +198,8 @@ export function subscribeToMessages(
         fileName: (data.fileName as string | undefined) ?? null,
         fileSize: (data.fileSize as number | undefined) ?? null,
         fileMimeType: (data.fileMimeType as string | undefined) ?? null,
+        viewOnce: data.viewOnce === true,
+        viewedAt: (data.viewedAt as Timestamp | undefined) ?? null,
         createdAt: (data.createdAt as Timestamp | undefined) ?? null,
       };
     }));
@@ -209,11 +213,15 @@ export async function sendMessage(
   imageUrl?: string | null,
   videoUrl?: string | null,
   file?: ChatFile | null,
+  viewOnce = false,
 ): Promise<void> {
   const cleanText = text.trim();
   if (!cleanText && !imageUrl && !videoUrl && !file) return;
   if ([imageUrl, videoUrl, file].filter(Boolean).length > 1) {
     throw new Error('A message can contain only one attachment.');
+  }
+  if (viewOnce && (!imageUrl && !videoUrl || !!file)) {
+    throw new Error('View once is available only for photos and videos.');
   }
   if (imageUrl && !/^https:\/\//.test(imageUrl)) {
     throw new Error('The selected photo URL is invalid.');
@@ -253,6 +261,7 @@ export async function sendMessage(
       text: cleanText,
       ...(imageUrl ? { imageUrl } : {}),
       ...(videoUrl ? { videoUrl } : {}),
+      ...(viewOnce ? { viewOnce: true } : {}),
       ...(file ? {
         fileUrl: file.fileUrl,
         fileName: file.fileName,
@@ -262,9 +271,22 @@ export async function sendMessage(
       createdAt: serverTimestamp(),
     });
     transaction.update(conversationRef, {
-      lastMessage: imageUrl ? 'Photo' : videoUrl ? 'Video' : file ? `File: ${file.fileName}` : cleanText,
+      lastMessage: viewOnce ? 'View once media' : imageUrl ? 'Photo' : videoUrl ? 'Video' : file ? `File: ${file.fileName}` : cleanText,
       lastMessageAt: serverTimestamp(),
       lastMessageSenderId: senderId,
     });
+  });
+}
+
+export async function markViewOnceMessageViewed(conversationId: string, messageId: string, recipientId: string): Promise<void> {
+  const messageRef = doc(db, 'conversations', conversationId, 'messages', messageId);
+  await runTransaction(db, async (transaction) => {
+    const messageSnapshot = await transaction.get(messageRef);
+    if (!messageSnapshot.exists()) throw new Error('This message is no longer available.');
+    const message = messageSnapshot.data();
+    if (message.recipientId !== recipientId || message.viewOnce !== true || message.viewedAt != null) {
+      throw new Error('This view-once message is no longer available.');
+    }
+    transaction.update(messageRef, { viewedAt: serverTimestamp() });
   });
 }

@@ -156,7 +156,7 @@ service cloud.firestore {
         allow create: if request.auth != null
           && request.resource.data.keys().hasOnly([
             'senderId', 'recipientId', 'text', 'imageUrl', 'videoUrl',
-            'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'createdAt'
+            'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'viewOnce', 'viewedAt', 'createdAt'
           ])
           && request.resource.data.senderId == request.auth.uid
           && request.resource.data.text is string
@@ -192,11 +192,22 @@ service cloud.firestore {
                 || (request.resource.data.fileMimeType is string
                   && request.resource.data.fileMimeType.size() > 0))
               && request.resource.data.text.size() >= 0))
+          && (!request.resource.data.keys().hasAny(['viewOnce', 'viewedAt'])
+            || (request.resource.data.keys().hasAll(['viewOnce'])
+              && request.resource.data.viewOnce == true
+              && !request.resource.data.keys().hasAny(['viewedAt'])
+              && request.resource.data.keys().hasAny(['imageUrl', 'videoUrl'])))
           && ((get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
             && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.resource.data.recipientId)
             || (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid
             && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.resource.data.recipientId));
-        allow update, delete: if false;
+        allow update: if request.auth != null
+          && resource.data.recipientId == request.auth.uid
+          && resource.data.viewOnce == true
+          && !resource.data.keys().hasAny(['viewedAt'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewedAt'])
+          && request.resource.data.viewedAt is timestamp;
+        allow delete: if false;
       }
     }
 
