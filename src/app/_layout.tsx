@@ -27,7 +27,7 @@ function AppNavigator() {
 
     const firstSegment = segments[0] as string | undefined;
     const publicRoute = firstSegment === 'welcome' || firstSegment === 'sign-in' || firstSegment === 'create-account';
-    const protectedRoute = firstSegment === '(tabs)' || firstSegment === 'friends' || firstSegment === 'settings' || firstSegment === 'edit-profile' || firstSegment === 'chat';
+    const protectedRoute = firstSegment === '(tabs)' || firstSegment === 'friends' || firstSegment === 'settings' || firstSegment === 'edit-profile' || firstSegment === 'chat' || firstSegment === 'group';
 
     if (user && publicRoute) {
       router.replace('/(tabs)');
@@ -58,6 +58,9 @@ function AppNavigator() {
       <Stack.Screen name="settings" />
       <Stack.Screen name="edit-profile" />
       <Stack.Screen name="chat/[conversationId]" />
+      <Stack.Screen name="group/create" />
+      <Stack.Screen name="group/[groupId]" />
+      <Stack.Screen name="group/[groupId]/info" />
       <Stack.Screen name="post/[postId]/comments" />
     </Stack>
   );
