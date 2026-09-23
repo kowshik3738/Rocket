@@ -150,6 +150,53 @@ service cloud.firestore {
       allow delete: if false;
 
       match /messages/{messageId} {
+        function validCallHistory(messageId) {
+          return request.auth != null
+            && request.resource.data.keys().hasAll([
+              'callId', 'callerId', 'calleeId', 'callOutcome',
+              'callEndedAt', 'createdAt'
+            ])
+            && request.resource.data.keys().hasOnly([
+              'callId', 'callerId', 'calleeId', 'callOutcome',
+              'callAnsweredAt', 'callEndedAt', 'createdAt'
+            ])
+            && request.resource.data.callId is string
+            && request.resource.data.callerId is string
+            && request.resource.data.calleeId is string
+            && request.resource.data.callEndedAt is timestamp
+            && request.resource.data.createdAt is timestamp
+            && messageId == 'call_' + request.resource.data.callId
+            && validCallHistoryForTerminalCall();
+        }
+
+        function validCallHistoryForTerminalCall() {
+          let call = get(/databases/$(database)/documents/calls/$(request.resource.data.callId)).data;
+          let conversation = get(/databases/$(database)/documents/conversations/$(conversationId)).data;
+          return call.conversationId == conversationId
+            && call.kind == 'voice'
+            && call.callerId == request.resource.data.callerId
+            && call.calleeId == request.resource.data.calleeId
+            && call.callerId != call.calleeId
+            && (request.auth.uid == call.callerId || request.auth.uid == call.calleeId)
+            && ((conversation.participantA == call.callerId && conversation.participantB == call.calleeId)
+              || (conversation.participantB == call.callerId && conversation.participantA == call.calleeId))
+            && call.endedAt is timestamp
+            && request.resource.data.callEndedAt == call.endedAt
+            && request.resource.data.createdAt == call.endedAt
+            && ((request.resource.data.callOutcome == 'cancelled'
+              && call.phase == 'cancelled'
+              && !request.resource.data.keys().hasAny(['callAnsweredAt']))
+              || (request.resource.data.callOutcome == 'declined'
+                && call.phase == 'declined'
+                && !request.resource.data.keys().hasAny(['callAnsweredAt']))
+              || (request.resource.data.callOutcome == 'completed'
+                && call.phase == 'ended'
+                && call.answeredAt is timestamp
+                && request.resource.data.keys().hasAll(['callAnsweredAt'])
+                && request.resource.data.callAnsweredAt is timestamp
+                && request.resource.data.callAnsweredAt == call.answeredAt));
+        }
+
         allow read: if request.auth != null
           && (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
             || get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid);
@@ -200,7 +247,8 @@ service cloud.firestore {
           && ((get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
             && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.resource.data.recipientId)
             || (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid
-            && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.resource.data.recipientId));
+            && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.resource.data.recipientId))
+          || validCallHistory(messageId);
         allow update: if request.auth != null
           && resource.data.recipientId == request.auth.uid
           && resource.data.viewOnce == true
@@ -208,6 +256,161 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewedAt'])
           && request.resource.data.viewedAt is timestamp;
         allow delete: if false;
+      }
+    }
+
+    match /calls/{callId} {
+      function validCallFields(call) {
+        return call.keys().hasAll([
+            'conversationId', 'callerId', 'calleeId', 'kind', 'phase',
+            'offerType', 'offerSdp', 'createdAt'
+          ])
+          && call.keys().hasOnly([
+            'conversationId', 'callerId', 'calleeId', 'kind', 'phase',
+            'offerType', 'offerSdp', 'createdAt', 'answerType', 'answerSdp',
+            'answeredAt', 'endedAt', 'endedBy'
+          ])
+          && call.conversationId is string
+          && call.callerId is string
+          && call.calleeId is string
+          && call.callerId != call.calleeId
+          && call.kind == 'voice'
+          && (call.phase == 'ringing' || call.phase == 'accepted'
+            || call.phase == 'cancelled' || call.phase == 'declined' || call.phase == 'failed'
+            || call.phase == 'ended')
+          && call.offerType == 'offer'
+          && call.offerSdp is string
+          && call.offerSdp.size() > 0
+          && call.offerSdp.size() <= 50000
+          && call.createdAt is timestamp
+          && (!call.keys().hasAny(['answerType', 'answerSdp', 'answeredAt'])
+            || (call.keys().hasAll(['answerType', 'answerSdp', 'answeredAt'])
+              && call.answerType == 'answer'
+              && call.answerSdp is string
+              && call.answerSdp.size() > 0
+              && call.answerSdp.size() <= 50000
+              && call.answeredAt is timestamp))
+          && (!call.keys().hasAny(['endedAt', 'endedBy'])
+            || (call.keys().hasAll(['endedAt', 'endedBy'])
+              && call.endedAt is timestamp
+              && call.endedBy is string));
+      }
+
+      function matchesConversationParticipants(call) {
+        return call.conversationId is string
+          && call.callerId is string
+          && call.calleeId is string
+          && exists(/databases/$(database)/documents/conversations/$(call.conversationId))
+          && ((get(/databases/$(database)/documents/conversations/$(call.conversationId)).data.participantA == call.callerId
+            && get(/databases/$(database)/documents/conversations/$(call.conversationId)).data.participantB == call.calleeId)
+            || (get(/databases/$(database)/documents/conversations/$(call.conversationId)).data.participantB == call.callerId
+              && get(/databases/$(database)/documents/conversations/$(call.conversationId)).data.participantA == call.calleeId));
+      }
+
+      function isCallParticipant(call) {
+        return request.auth != null
+          && (request.auth.uid == call.callerId || request.auth.uid == call.calleeId)
+          && matchesConversationParticipants(call);
+      }
+
+      function validCandidate(candidate) {
+        return candidate.keys().hasOnly(['candidate', 'sdpMid', 'sdpMLineIndex', 'createdAt'])
+          && candidate.keys().hasAll(['candidate', 'sdpMid', 'sdpMLineIndex', 'createdAt'])
+          && candidate.candidate is string
+          && candidate.candidate.size() > 0
+          && candidate.candidate.size() <= 2000
+          && (candidate.sdpMid == null || (candidate.sdpMid is string && candidate.sdpMid.size() <= 256))
+          && (candidate.sdpMLineIndex == null || candidate.sdpMLineIndex is int)
+          && candidate.createdAt is timestamp
+          && candidate.createdAt == request.time;
+      }
+
+      // A call document can be fetched only after validating its immutable
+      // participant/conversation relationship. Incoming-call discovery is a
+      // bounded query, so its predicate must be directly provable from the
+      // query fields; create/update rules preserve that same relationship.
+      allow get: if isCallParticipant(resource.data) && validCallFields(resource.data);
+      allow list: if request.auth != null
+        && request.auth.uid == resource.data.calleeId
+        && resource.data.phase == 'ringing'
+        && request.query.limit <= 20;
+      allow create: if request.auth != null
+        && validCallFields(request.resource.data)
+        && matchesConversationParticipants(request.resource.data)
+        && request.resource.data.callerId == request.auth.uid
+        && request.resource.data.phase == 'ringing'
+        && request.resource.data.keys().hasOnly([
+          'conversationId', 'callerId', 'calleeId', 'kind', 'phase',
+          'offerType', 'offerSdp', 'createdAt'
+        ])
+        && request.resource.data.createdAt == request.time;
+      allow update: if isCallParticipant(resource.data)
+        && validCallFields(resource.data)
+        && validCallFields(request.resource.data)
+        && matchesConversationParticipants(request.resource.data)
+        && request.resource.data.conversationId == resource.data.conversationId
+        && request.resource.data.callerId == resource.data.callerId
+        && request.resource.data.calleeId == resource.data.calleeId
+        && request.resource.data.kind == resource.data.kind
+        && request.resource.data.offerType == resource.data.offerType
+        && request.resource.data.offerSdp == resource.data.offerSdp
+        && request.resource.data.createdAt == resource.data.createdAt
+        && ((request.auth.uid == resource.data.callerId
+          && resource.data.phase == 'ringing'
+          && request.resource.data.phase == 'cancelled'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phase', 'endedAt', 'endedBy'])
+          && request.resource.data.endedAt == request.time
+          && request.resource.data.endedBy == request.auth.uid)
+          || (request.auth.uid == resource.data.calleeId
+            && resource.data.phase == 'ringing'
+            && !resource.data.keys().hasAny(['answerType', 'answerSdp', 'answeredAt'])
+            && request.resource.data.phase == 'accepted'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'phase', 'answerType', 'answerSdp', 'answeredAt'
+            ])
+            && request.resource.data.answeredAt == request.time)
+          || (request.auth.uid == resource.data.calleeId
+            && resource.data.phase == 'ringing'
+            && request.resource.data.phase == 'declined'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phase', 'endedAt', 'endedBy'])
+            && request.resource.data.endedAt == request.time
+            && request.resource.data.endedBy == request.auth.uid)
+          || ((request.auth.uid == resource.data.callerId || request.auth.uid == resource.data.calleeId)
+            && (resource.data.phase == 'ringing' || resource.data.phase == 'accepted')
+            && request.resource.data.phase == 'failed'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phase', 'endedAt', 'endedBy'])
+            && request.resource.data.endedAt == request.time
+            && request.resource.data.endedBy == request.auth.uid)
+          || ((request.auth.uid == resource.data.callerId || request.auth.uid == resource.data.calleeId)
+            && resource.data.phase == 'accepted'
+            && request.resource.data.phase == 'ended'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phase', 'endedAt', 'endedBy'])
+            && request.resource.data.endedAt == request.time
+            && request.resource.data.endedBy == request.auth.uid));
+      allow delete: if false;
+
+      match /callerCandidates/{candidateId} {
+        allow read: if isCallParticipant(get(/databases/$(database)/documents/calls/$(callId)).data)
+          && validCallFields(get(/databases/$(database)/documents/calls/$(callId)).data);
+        allow create: if request.auth != null
+          && validCandidate(request.resource.data)
+          && get(/databases/$(database)/documents/calls/$(callId)).data.callerId == request.auth.uid
+          && isCallParticipant(get(/databases/$(database)/documents/calls/$(callId)).data)
+          && (get(/databases/$(database)/documents/calls/$(callId)).data.phase == 'ringing'
+            || get(/databases/$(database)/documents/calls/$(callId)).data.phase == 'accepted');
+        allow update, delete: if false;
+      }
+
+      match /calleeCandidates/{candidateId} {
+        allow read: if isCallParticipant(get(/databases/$(database)/documents/calls/$(callId)).data)
+          && validCallFields(get(/databases/$(database)/documents/calls/$(callId)).data);
+        allow create: if request.auth != null
+          && validCandidate(request.resource.data)
+          && get(/databases/$(database)/documents/calls/$(callId)).data.calleeId == request.auth.uid
+          && isCallParticipant(get(/databases/$(database)/documents/calls/$(callId)).data)
+          && (get(/databases/$(database)/documents/calls/$(callId)).data.phase == 'ringing'
+            || get(/databases/$(database)/documents/calls/$(callId)).data.phase == 'accepted');
+        allow update, delete: if false;
       }
     }
 

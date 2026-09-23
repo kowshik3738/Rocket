@@ -38,6 +38,12 @@ export type ChatMessage = {
   fileMimeType: string | null;
   viewOnce: boolean;
   viewedAt: Timestamp | null;
+  callId: string | null;
+  callerId: string | null;
+  calleeId: string | null;
+  callOutcome: 'cancelled' | 'declined' | 'completed' | null;
+  callAnsweredAt: Timestamp | null;
+  callEndedAt: Timestamp | null;
   createdAt: Timestamp | null;
 };
 
@@ -46,6 +52,38 @@ export type ChatFile = {
   fileName: string;
   fileSize?: number | null;
   fileMimeType?: string | null;
+};
+
+export type FirestoreTimestampValue = {
+  seconds?: unknown;
+  nanoseconds?: unknown;
+  toMillis?: unknown;
+};
+
+export function getFirestoreTimestampMillis(value: unknown): number | null {
+  if (!value || typeof value !== 'object') return null;
+  const timestamp = value as FirestoreTimestampValue;
+  if (typeof timestamp.toMillis === 'function') {
+    try {
+      const milliseconds = timestamp.toMillis();
+      if (typeof milliseconds === 'number' && Number.isFinite(milliseconds)) return milliseconds;
+    } catch {
+      // Fall through to the seconds/nanoseconds representation below.
+    }
+  }
+  if (typeof timestamp.seconds !== 'number' || typeof timestamp.nanoseconds !== 'number') return null;
+  const milliseconds = timestamp.seconds * 1000 + timestamp.nanoseconds / 1_000_000;
+  return Number.isFinite(milliseconds) ? milliseconds : null;
+}
+
+export type CallHistoryRecord = {
+  callId: string;
+  conversationId: string;
+  callerId: string;
+  calleeId: string;
+  outcome: 'cancelled' | 'declined' | 'completed';
+  answeredAt: FirestoreTimestampValue | null;
+  endedAt: FirestoreTimestampValue;
 };
 
 export function getConversationId(firstUid: string, secondUid: string): string {
@@ -189,9 +227,9 @@ export function subscribeToMessages(
       const data = messageSnapshot.data();
       return {
         id: messageSnapshot.id,
-        senderId: data.senderId as string,
-        recipientId: data.recipientId as string,
-        text: data.text as string,
+        senderId: (data.senderId as string | undefined) ?? '',
+        recipientId: (data.recipientId as string | undefined) ?? '',
+        text: (data.text as string | undefined) ?? '',
         imageUrl: (data.imageUrl as string | undefined) ?? null,
         videoUrl: (data.videoUrl as string | undefined) ?? null,
         fileUrl: (data.fileUrl as string | undefined) ?? null,
@@ -200,10 +238,40 @@ export function subscribeToMessages(
         fileMimeType: (data.fileMimeType as string | undefined) ?? null,
         viewOnce: data.viewOnce === true,
         viewedAt: (data.viewedAt as Timestamp | undefined) ?? null,
+        callId: (data.callId as string | undefined) ?? null,
+        callerId: (data.callerId as string | undefined) ?? null,
+        calleeId: (data.calleeId as string | undefined) ?? null,
+        callOutcome: data.callOutcome === 'cancelled' || data.callOutcome === 'declined' || data.callOutcome === 'completed'
+          ? data.callOutcome
+          : null,
+        callAnsweredAt: (data.callAnsweredAt as Timestamp | undefined) ?? null,
+        callEndedAt: (data.callEndedAt as Timestamp | undefined) ?? null,
         createdAt: (data.createdAt as Timestamp | undefined) ?? null,
       };
     }));
   }, onError);
+}
+
+export async function recordCallHistory(call: CallHistoryRecord): Promise<void> {
+  if (call.outcome === 'completed' && !call.answeredAt) {
+    throw new Error('A completed call is missing its accepted timestamp.');
+  }
+
+  const messageRef = doc(db, 'conversations', call.conversationId, 'messages', `call_${call.callId}`);
+  await runTransaction(db, async (transaction) => {
+    const existing = await transaction.get(messageRef);
+    if (existing.exists()) return;
+
+    transaction.set(messageRef, {
+      callId: call.callId,
+      callerId: call.callerId,
+      calleeId: call.calleeId,
+      callOutcome: call.outcome,
+      ...(call.outcome === 'completed' ? { callAnsweredAt: call.answeredAt } : {}),
+      callEndedAt: call.endedAt,
+      createdAt: call.endedAt,
+    });
+  });
 }
 
 export async function sendMessage(

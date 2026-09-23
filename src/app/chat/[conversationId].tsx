@@ -13,12 +13,47 @@ import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressa
 import { Avatar, Screen, colors } from '@/components/rocket-ui';
 import { useAuth } from '@/providers/auth-provider';
 import { uploadChatFile, uploadChatVideo, uploadPostImage } from '@/services/cloudinary-service';
-import { ChatFile, ChatMessage, Conversation, getConversation, markViewOnceMessageViewed, sendMessage, subscribeToMessages } from '@/services/messaging-service';
+import { getResumableCallForConversation, startOutgoingCall } from '@/services/call-service';
+import {
+  ChatFile,
+  ChatMessage,
+  Conversation,
+  getConversation,
+  getFirestoreTimestampMillis,
+  markViewOnceMessageViewed,
+  sendMessage,
+  subscribeToMessages,
+} from '@/services/messaging-service';
 import { getProfileColor, getProfileInitials } from '@/services/user-service';
 
 function formatTime(message: ChatMessage) {
   if (!message.createdAt) return '';
   return message.createdAt.toDate().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function formatCallDuration(message: ChatMessage) {
+  const answeredAtMillis = getFirestoreTimestampMillis(message.callAnsweredAt);
+  const endedAtMillis = getFirestoreTimestampMillis(message.callEndedAt);
+  if (answeredAtMillis == null || endedAtMillis == null) return 'Completed';
+  const totalSeconds = Math.max(0, Math.floor((endedAtMillis - answeredAtMillis) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function isCallHistoryMessage(message: ChatMessage) {
+  return !!message.callId && !!message.callerId && !!message.calleeId && !!message.callOutcome;
+}
+
+function callHistoryLabel(message: ChatMessage, currentUid: string | undefined) {
+  const outgoing = message.callerId === currentUid;
+  if (message.callOutcome === 'cancelled') {
+    return outgoing ? 'Outgoing voice call · Cancelled' : 'Missed voice call';
+  }
+  if (message.callOutcome === 'declined') {
+    return outgoing ? 'Outgoing voice call · Declined' : 'Incoming voice call · Declined';
+  }
+  return `${outgoing ? 'Outgoing' : 'Incoming'} voice call · ${formatCallDuration(message)}`;
 }
 
 function formatFileSize(size: number | null) {
@@ -164,6 +199,7 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [sendingProgress, setSendingProgress] = useState<{ current: number; total: number } | null>(null);
+  const [startingCall, setStartingCall] = useState(false);
   const [error, setError] = useState('');
   const openingFileUrls = useRef(new Set<string>());
   const [openingFileUrl, setOpeningFileUrl] = useState<string | null>(null);
@@ -183,11 +219,28 @@ export default function ChatScreen() {
       })
       .catch((loadError) => {
         if (!active) return;
+        const firestoreError = loadError as Error & { code?: string };
+        console.error('[Rocket chat Firestore] operation failed', {
+          operation: 'get',
+          path: `conversations/${conversationId}`,
+          uid: user.uid,
+          code: firestoreError.code ?? 'unknown',
+          message: firestoreError.message,
+        });
         setError(loadError instanceof Error ? loadError.message : 'This conversation could not be loaded.');
         setLoading(false);
-      });
+    });
     const unsubscribe = subscribeToMessages(conversationId, setMessages, (messageError) => {
-      if (active) setError(messageError.message || 'Messages could not be loaded.');
+      if (!active) return;
+      const firestoreError = messageError as Error & { code?: string };
+      console.error('[Rocket chat Firestore] operation failed', {
+        operation: 'list',
+        path: `conversations/${conversationId}/messages`,
+        uid: user.uid,
+        code: firestoreError.code ?? 'unknown',
+        message: messageError.message,
+      });
+      setError(messageError.message || 'Messages could not be loaded.');
     });
     return () => {
       active = false;
@@ -217,6 +270,25 @@ export default function ChatScreen() {
       setSelectedFile(null);
       setSendMediaViewOnce(false);
       setError('');
+    }
+  }
+
+  async function handleStartVoiceCall() {
+    if (!user || !conversation?.otherUser || startingCall) return;
+    setStartingCall(true);
+    setError('');
+    try {
+      const resumableCall = getResumableCallForConversation(conversation.id, user.uid);
+      if (resumableCall) {
+        router.push(`/call/${resumableCall.id}`);
+        return;
+      }
+      const callId = await startOutgoingCall(conversation.id, user.uid, conversation.otherUser.uid);
+      router.push(`/call/${callId}`);
+    } catch (callError) {
+      setError(callError instanceof Error ? callError.message : 'The voice call could not be started.');
+    } finally {
+      setStartingCall(false);
     }
   }
 
@@ -385,7 +457,10 @@ export default function ChatScreen() {
     header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: colors.border },
     back: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.backgroundElement, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
     backIcon: { color: colors.text, fontSize: 29, lineHeight: 29, marginTop: -3 },
-    headerInfo: { marginLeft: 10 },
+    headerInfo: { flex: 1, marginLeft: 10 },
+    callButton: { width: 38, height: 38, borderRadius: 13, backgroundColor: colors.backgroundElement, alignItems: 'center', justifyContent: 'center' },
+    callButtonDisabled: { opacity: 0.5 },
+    callButtonText: { color: colors.accent, fontSize: 19, fontWeight: '800' },
     name: { color: colors.text, fontSize: 15, fontWeight: '800' },
     handle: { color: colors.textSecondary, fontSize: 11, marginTop: 4 },
     messages: { flexGrow: 1, padding: 20, justifyContent: 'flex-end' },
@@ -401,6 +476,10 @@ export default function ChatScreen() {
     mineText: { color: '#FFF' },
     timestamp: { color: colors.textSecondary, fontSize: 9, marginTop: 5 },
     mineTimestamp: { color: '#FFE3E5', textAlign: 'right' },
+    callHistoryRow: { alignItems: 'center', marginBottom: 12 },
+    callHistoryCard: { maxWidth: '88%', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 14, backgroundColor: colors.backgroundElement, borderWidth: 1, borderColor: colors.border },
+    callHistoryText: { color: colors.textSecondary, fontSize: 12, fontWeight: '800', textAlign: 'center' },
+    callHistoryTime: { color: colors.textSecondary, fontSize: 9, marginTop: 4 },
     messageImage: { width: 220, maxWidth: '100%', height: 220, maxHeight: 260, borderRadius: 12, marginBottom: 8 },
     previewWrap: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: 1, borderTopColor: colors.border },
     previewList: { flex: 1 },
@@ -468,6 +547,9 @@ export default function ChatScreen() {
           <Text style={page.name}>{otherUser.displayName}</Text>
           <Text style={page.handle}>@{otherUser.username}</Text>
         </View>
+        <Pressable accessibilityLabel="Start voice call" disabled={startingCall} onPress={() => void handleStartVoiceCall()} style={[page.callButton, startingCall && page.callButtonDisabled]}>
+          <Text style={page.callButtonText}>{startingCall ? '…' : '☎'}</Text>
+        </Pressable>
       </View>
 
       <ScrollView contentContainerStyle={page.messages} showsVerticalScrollIndicator={false}>
@@ -479,6 +561,16 @@ export default function ChatScreen() {
         ) : (
           messages.map((message) => {
             const mine = message.senderId === user?.uid;
+            if (isCallHistoryMessage(message)) {
+              return (
+                <View key={message.id} style={page.callHistoryRow}>
+                  <View style={page.callHistoryCard}>
+                    <Text style={page.callHistoryText}>{callHistoryLabel(message, user?.uid)}</Text>
+                    <Text style={page.callHistoryTime}>{formatTime(message)}</Text>
+                  </View>
+                </View>
+              );
+            }
             const fileUrl = message.fileUrl;
             const viewOnceState = message.viewedAt ? 'Opened' : mine ? 'View once' : `View ${message.imageUrl ? 'photo' : 'video'}`;
             return (
