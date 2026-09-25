@@ -53,6 +53,32 @@ service cloud.firestore {
     }
 
     match /friendRequests/{requestId} {
+      function noFriendshipExists(senderId, recipientId) {
+        return (senderId < recipientId
+          && !exists(/databases/$(database)/documents/friendships/$(senderId + '_' + recipientId)))
+          || (senderId > recipientId
+            && !exists(/databases/$(database)/documents/friendships/$(recipientId + '_' + senderId)));
+      }
+
+      function hasNoActiveReverseRequest(senderId, recipientId) {
+        return !exists(/databases/$(database)/documents/friendRequests/$(recipientId + '_' + senderId))
+          || get(/databases/$(database)/documents/friendRequests/$(recipientId + '_' + senderId)).data.status == 'declined';
+      }
+
+      function canStartFriendRequest(senderId, recipientId) {
+        return noFriendshipExists(senderId, recipientId)
+          && hasNoActiveReverseRequest(senderId, recipientId);
+      }
+
+      function hasAuthoritativeFriendshipAfter(friendRequest) {
+        return ((friendRequest.senderId < friendRequest.recipientId
+          && existsAfter(/databases/$(database)/documents/friendships/$(friendRequest.senderId + '_' + friendRequest.recipientId)))
+          || (friendRequest.senderId > friendRequest.recipientId
+            && existsAfter(/databases/$(database)/documents/friendships/$(friendRequest.recipientId + '_' + friendRequest.senderId))))
+          && existsAfter(/databases/$(database)/documents/userFriends/$(friendRequest.senderId + '_' + friendRequest.recipientId))
+          && existsAfter(/databases/$(database)/documents/userFriends/$(friendRequest.recipientId + '_' + friendRequest.senderId));
+      }
+
       allow read: if request.auth != null
         && (resource == null || resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
       allow create: if request.auth != null
@@ -61,26 +87,42 @@ service cloud.firestore {
         && request.resource.data.senderId == request.auth.uid
         && request.resource.data.recipientId != request.auth.uid
         && request.resource.data.status == 'pending'
-        && request.resource.data.createdAt is timestamp;
+        && request.resource.data.createdAt is timestamp
+        && canStartFriendRequest(request.resource.data.senderId, request.resource.data.recipientId);
       allow update: if request.auth != null
-        && resource.data.recipientId == request.auth.uid
         && request.resource.data.keys().hasOnly([
           'senderId', 'recipientId', 'status', 'createdAt', 'acceptedAt', 'declinedAt'
         ])
         && request.resource.data.senderId == resource.data.senderId
         && request.resource.data.recipientId == resource.data.recipientId
         && request.resource.data.createdAt == resource.data.createdAt
-        && resource.data.status == 'pending'
-        && ((request.resource.data.status == 'accepted'
-          && request.resource.data.acceptedAt is timestamp
-          && !request.resource.data.keys().hasAny(['declinedAt']))
-          || (request.resource.data.status == 'declined'
-          && request.resource.data.declinedAt is timestamp
-          && !request.resource.data.keys().hasAny(['acceptedAt'])));
+        && ((resource.data.recipientId == request.auth.uid
+          && resource.data.status == 'pending'
+          && ((request.resource.data.status == 'accepted'
+            && request.resource.data.acceptedAt is timestamp
+            && !request.resource.data.keys().hasAny(['declinedAt'])
+            && hasAuthoritativeFriendshipAfter(request.resource.data))
+            || (request.resource.data.status == 'declined'
+              && request.resource.data.declinedAt is timestamp
+              && !request.resource.data.keys().hasAny(['acceptedAt']))))
+          || (resource.data.senderId == request.auth.uid
+            && resource.data.status == 'declined'
+            && request.resource.data.keys().hasOnly(['senderId', 'recipientId', 'status', 'createdAt'])
+            && request.resource.data.status == 'pending'
+            && canStartFriendRequest(resource.data.senderId, resource.data.recipientId)));
       allow delete: if false;
     }
 
     match /friendships/{friendshipId} {
+      function matchesAcceptedFriendRequest(friendship) {
+        let friendRequest = getAfter(/databases/$(database)/documents/friendRequests/$(friendship.requestId)).data;
+        return friendRequest.status == 'accepted'
+          && ((friendRequest.senderId == friendship.userA
+            && friendRequest.recipientId == friendship.userB)
+            || (friendRequest.senderId == friendship.userB
+              && friendRequest.recipientId == friendship.userA));
+      }
+
       allow read: if request.auth != null
         && (resource == null || resource.data.userA == request.auth.uid || resource.data.userB == request.auth.uid);
       allow create: if request.auth != null
@@ -92,9 +134,7 @@ service cloud.firestore {
         && request.resource.data.userA != request.resource.data.userB
         && (request.auth.uid == request.resource.data.userA || request.auth.uid == request.resource.data.userB)
         && request.resource.data.createdAt is timestamp
-        && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.status == 'accepted'
-        && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.senderId == request.resource.data.userA
-        && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.recipientId == request.resource.data.userB;
+        && matchesAcceptedFriendRequest(request.resource.data);
       allow update, delete: if false;
     }
 

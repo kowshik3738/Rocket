@@ -1,5 +1,6 @@
 import {
     collection,
+    deleteField,
     doc,
     getDoc,
     getDocs,
@@ -8,7 +9,6 @@ import {
     runTransaction,
     serverTimestamp,
     Timestamp,
-    updateDoc,
     where,
 } from 'firebase/firestore';
 
@@ -121,11 +121,22 @@ export async function sendFriendRequest(senderId: string, recipientId: string): 
     if (friendship.exists()) {
       throw new Error('You are already friends.');
     }
-    if (outgoing.exists() && outgoing.data().status === 'pending') {
-      throw new Error('Friend request already sent.');
-    }
     if (incoming.exists() && incoming.data().status === 'pending') {
       throw new Error('This person has already sent you a friend request.');
+    }
+
+    if (outgoing.exists()) {
+      if (outgoing.data().status === 'pending') {
+        throw new Error('Friend request already sent.');
+      }
+      if (outgoing.data().status === 'declined') {
+        transaction.update(outgoingRef, {
+          status: 'pending',
+          declinedAt: deleteField(),
+        });
+        return;
+      }
+      throw new Error('This friend request has already been resolved.');
     }
 
     transaction.set(outgoingRef, {
@@ -158,45 +169,49 @@ export async function getIncomingFriendRequests(currentUid: string): Promise<Fri
 }
 
 export async function acceptFriendRequest(request: FriendRequest, currentUid: string): Promise<void> {
-  if (request.recipientId !== currentUid || request.status !== 'pending') {
-    throw new Error('This friend request cannot be accepted.');
-  }
-
   const requestRef = doc(db, 'friendRequests', request.id);
-  const friendshipRef = doc(db, 'friendships', friendshipId(request.senderId, request.recipientId));
-  const senderFriendRef = doc(db, 'userFriends', `${request.senderId}_${request.recipientId}`);
-  const recipientFriendRef = doc(db, 'userFriends', `${request.recipientId}_${request.senderId}`);
 
   try {
     await runTransaction(db, async (transaction) => {
-    const requestSnapshot = await transaction.get(requestRef);
-    const friendshipSnapshot = await transaction.get(friendshipRef);
-    if (!requestSnapshot.exists() || requestSnapshot.data().status !== 'pending') {
-      throw new Error('This friend request is no longer pending.');
-    }
-    if (friendshipSnapshot.exists()) {
-      throw new Error('You are already friends.');
-    }
+      const requestSnapshot = await transaction.get(requestRef);
+      if (!requestSnapshot.exists() || requestSnapshot.data().status !== 'pending') {
+        throw new Error('This friend request is no longer pending.');
+      }
 
-    transaction.update(requestRef, { status: 'accepted', acceptedAt: serverTimestamp() });
-    transaction.set(friendshipRef, {
-      userA: request.senderId,
-      userB: request.recipientId,
-      requestId: request.id,
-      createdAt: serverTimestamp(),
-    });
-    transaction.set(senderFriendRef, {
-      ownerId: request.senderId,
-      friendId: request.recipientId,
-      requestId: request.id,
-      createdAt: serverTimestamp(),
-    });
-    transaction.set(recipientFriendRef, {
-      ownerId: request.recipientId,
-      friendId: request.senderId,
-      requestId: request.id,
-      createdAt: serverTimestamp(),
-    });
+      const senderId = requestSnapshot.data().senderId as string;
+      const recipientId = requestSnapshot.data().recipientId as string;
+      if (recipientId !== currentUid || senderId === recipientId) {
+        throw new Error('This friend request cannot be accepted.');
+      }
+
+      const friendshipRef = doc(db, 'friendships', friendshipId(senderId, recipientId));
+      const friendshipSnapshot = await transaction.get(friendshipRef);
+      if (friendshipSnapshot.exists()) {
+        throw new Error('You are already friends.');
+      }
+
+      const [userA, userB] = [senderId, recipientId].sort();
+      const senderFriendRef = doc(db, 'userFriends', `${senderId}_${recipientId}`);
+      const recipientFriendRef = doc(db, 'userFriends', `${recipientId}_${senderId}`);
+      transaction.update(requestRef, { status: 'accepted', acceptedAt: serverTimestamp() });
+      transaction.set(friendshipRef, {
+        userA,
+        userB,
+        requestId: request.id,
+        createdAt: serverTimestamp(),
+      });
+      transaction.set(senderFriendRef, {
+        ownerId: senderId,
+        friendId: recipientId,
+        requestId: request.id,
+        createdAt: serverTimestamp(),
+      });
+      transaction.set(recipientFriendRef, {
+        ownerId: recipientId,
+        friendId: senderId,
+        requestId: request.id,
+        createdAt: serverTimestamp(),
+      });
     });
   } catch (error) {
     throw error;
@@ -204,12 +219,20 @@ export async function acceptFriendRequest(request: FriendRequest, currentUid: st
 }
 
 export async function declineFriendRequest(request: FriendRequest, currentUid: string): Promise<void> {
-  if (request.recipientId !== currentUid || request.status !== 'pending') {
-    throw new Error('This friend request cannot be declined.');
-  }
-  await updateDoc(doc(db, 'friendRequests', request.id), {
-    status: 'declined',
-    declinedAt: serverTimestamp(),
+  const requestRef = doc(db, 'friendRequests', request.id);
+  await runTransaction(db, async (transaction) => {
+    const requestSnapshot = await transaction.get(requestRef);
+    if (
+      !requestSnapshot.exists()
+      || requestSnapshot.data().recipientId !== currentUid
+      || requestSnapshot.data().status !== 'pending'
+    ) {
+      throw new Error('This friend request is no longer pending.');
+    }
+    transaction.update(requestRef, {
+      status: 'declined',
+      declinedAt: serverTimestamp(),
+    });
   });
 }
 
