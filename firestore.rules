@@ -416,6 +416,14 @@ service cloud.firestore {
     }
 
     match /posts/{postId} {
+      function canInteractWithPost() {
+        let post = get(/databases/$(database)/documents/posts/$(postId)).data;
+        return request.auth != null
+          && exists(/databases/$(database)/documents/posts/$(postId))
+          && (post.authorUid == request.auth.uid
+            || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + post.authorUid)));
+      }
+
       allow read: if request.auth != null
         && (resource.data.authorUid == request.auth.uid
           || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + resource.data.authorUid)));
@@ -438,12 +446,12 @@ service cloud.firestore {
         allow read: if request.auth != null
           && (get(/databases/$(database)/documents/posts/$(postId)).data.authorUid == request.auth.uid
             || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + get(/databases/$(database)/documents/posts/$(postId)).data.authorUid)));
-        allow create: if request.auth != null
+        allow create: if canInteractWithPost()
           && userId == request.auth.uid
           && request.resource.data.keys().hasOnly(['userUid', 'createdAt'])
           && request.resource.data.userUid == request.auth.uid
           && request.resource.data.createdAt is timestamp;
-        allow delete: if request.auth != null && userId == request.auth.uid;
+        allow delete: if canInteractWithPost() && userId == request.auth.uid;
         allow update: if false;
       }
 
@@ -451,14 +459,14 @@ service cloud.firestore {
         allow read: if request.auth != null
           && (get(/databases/$(database)/documents/posts/$(postId)).data.authorUid == request.auth.uid
             || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + get(/databases/$(database)/documents/posts/$(postId)).data.authorUid)));
-        allow create: if request.auth != null
+        allow create: if canInteractWithPost()
           && request.resource.data.keys().hasOnly(['authorUid', 'text', 'createdAt'])
           && request.resource.data.authorUid == request.auth.uid
           && request.resource.data.text is string
           && request.resource.data.text.size() > 0
           && request.resource.data.text.size() <= 500
           && request.resource.data.createdAt is timestamp;
-        allow update: if request.auth != null
+        allow update: if canInteractWithPost()
           && resource.data.authorUid == request.auth.uid
           && request.resource.data.keys().hasOnly(['authorUid', 'text', 'createdAt'])
           && request.resource.data.authorUid == resource.data.authorUid
@@ -466,7 +474,7 @@ service cloud.firestore {
           && request.resource.data.text is string
           && request.resource.data.text.size() > 0
           && request.resource.data.text.size() <= 500;
-        allow delete: if request.auth != null && resource.data.authorUid == request.auth.uid;
+        allow delete: if canInteractWithPost() && resource.data.authorUid == request.auth.uid;
       }
     }
 
