@@ -317,11 +317,18 @@ export async function sendMessage(
 
   const recipientId = conversation.participantA === senderId ? conversation.participantB : conversation.participantA;
   const conversationRef = doc(db, 'conversations', conversation.id);
+  const friendshipRef = doc(db, 'friendships', conversation.id);
   const messageRef = doc(collection(db, 'conversations', conversation.id, 'messages'));
   await runTransaction(db, async (transaction) => {
-    const conversationSnapshot = await transaction.get(conversationRef);
+    const [conversationSnapshot, friendshipSnapshot] = await Promise.all([
+      transaction.get(conversationRef),
+      transaction.get(friendshipRef),
+    ]);
     if (!conversationSnapshot.exists()) {
       throw new Error('This conversation is no longer available.');
+    }
+    if (!friendshipSnapshot.exists()) {
+      throw new Error('You can only message accepted friends.');
     }
     transaction.set(messageRef, {
       senderId,

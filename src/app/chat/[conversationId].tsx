@@ -9,8 +9,10 @@ import { usePreventScreenCapture } from 'expo-screen-capture';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { doc, onSnapshot } from 'firebase/firestore';
 
 import { Avatar, Screen, colors } from '@/components/rocket-ui';
+import { db } from '@/lib/firebase';
 import { useAuth } from '@/providers/auth-provider';
 import { uploadChatFile, uploadChatVideo, uploadPostImage } from '@/services/cloudinary-service';
 import { getResumableCallForConversation, startOutgoingCall } from '@/services/call-service';
@@ -200,6 +202,7 @@ export default function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [sendingProgress, setSendingProgress] = useState<{ current: number; total: number } | null>(null);
   const [startingCall, setStartingCall] = useState(false);
+  const [isFriend, setIsFriend] = useState<boolean | null>(null);
   const [error, setError] = useState('');
   const openingFileUrls = useRef(new Set<string>());
   const [openingFileUrl, setOpeningFileUrl] = useState<string | null>(null);
@@ -234,6 +237,14 @@ export default function ChatScreen() {
         setError(loadError instanceof Error ? loadError.message : 'This conversation could not be loaded.');
         setLoading(false);
     });
+    const friendshipRef = doc(db, 'friendships', conversationId);
+    const unsubscribeFriendship = onSnapshot(friendshipRef, (snapshot) => {
+      if (!active) return;
+      setIsFriend(snapshot.exists());
+    }, () => {
+      if (!active) return;
+      setIsFriend(false);
+    });
     const unsubscribe = subscribeToMessages(conversationId, (nextMessages) => {
       setMessages(nextMessages);
       if (nextMessages.length === 0) initialScrollPending.current = false;
@@ -252,10 +263,12 @@ export default function ChatScreen() {
     return () => {
       active = false;
       unsubscribe();
+      unsubscribeFriendship();
     };
   }, [conversationId, user]);
 
   async function handlePickMedia() {
+    if (isFriend === false) return;
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
       setError('Media library access is required to send photos or videos.');
@@ -281,7 +294,7 @@ export default function ChatScreen() {
   }
 
   async function handleStartVoiceCall() {
-    if (!user || !conversation?.otherUser || startingCall) return;
+    if (!user || !conversation?.otherUser || startingCall || isFriend === false) return;
     setStartingCall(true);
     setError('');
     try {
@@ -300,6 +313,7 @@ export default function ChatScreen() {
   }
 
   async function handlePickFile() {
+    if (isFriend === false) return;
     try {
       const result = await DocumentPicker.getDocumentAsync({
         copyToCacheDirectory: true,
@@ -354,6 +368,7 @@ export default function ChatScreen() {
   }
 
   function handlePickAttachment() {
+    if (isFriend === false) return;
     Alert.alert('Add attachment', 'Choose photos, videos, or a file to send.', [
       { text: 'Photos & videos', onPress: () => void handlePickMedia() },
       { text: 'File', onPress: () => void handlePickFile() },
@@ -419,7 +434,7 @@ export default function ChatScreen() {
   }
 
   async function handleSend() {
-    if (!conversation || !user || sending) return;
+    if (!conversation || !user || sending || isFriend === false) return;
     const canSendText = !!text.trim();
     if (!canSendText && selectedMedia.length === 0 && !selectedFile) return;
     setSending(true);
@@ -526,6 +541,8 @@ export default function ChatScreen() {
     gallery: { width: 38, height: 38, borderRadius: 12, backgroundColor: colors.backgroundElement, alignItems: 'center', justifyContent: 'center' },
     galleryText: { color: colors.accent, fontSize: 22, lineHeight: 22 },
     composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 9, padding: 12, borderTopWidth: 1, borderTopColor: colors.border },
+    lockedNotice: { paddingVertical: 16, paddingHorizontal: 20, borderTopWidth: 1, borderTopColor: colors.border, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.backgroundElement },
+    lockedNoticeText: { color: colors.textSecondary, fontSize: 13, fontWeight: '700', textAlign: 'center' },
     input: { flex: 1, maxHeight: 100, minHeight: 44, borderRadius: 16, backgroundColor: colors.backgroundElement, color: colors.text, paddingHorizontal: 14, paddingVertical: 11, fontSize: 15 },
     send: { width: 44, height: 44, borderRadius: 15, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
     sendDisabled: { opacity: 0.45 },
@@ -561,7 +578,7 @@ export default function ChatScreen() {
           <Text style={page.name}>{otherUser.displayName}</Text>
           <Text style={page.handle}>@{otherUser.username}</Text>
         </View>
-        <Pressable accessibilityLabel="Start voice call" disabled={startingCall} onPress={() => void handleStartVoiceCall()} style={[page.callButton, startingCall && page.callButtonDisabled]}>
+        <Pressable accessibilityLabel="Start voice call" disabled={startingCall || isFriend === false} onPress={() => void handleStartVoiceCall()} style={[page.callButton, (startingCall || isFriend === false) && page.callButtonDisabled]}>
           <Text style={page.callButtonText}>{startingCall ? '…' : '☎'}</Text>
         </Pressable>
       </View>
@@ -690,19 +707,25 @@ export default function ChatScreen() {
         </View>
       ) : null}
 
-      <View style={page.composer}>
-        <Pressable disabled={sending} onPress={handlePickAttachment} style={page.gallery}>
-          <Text style={page.galleryText}>＋</Text>
-        </Pressable>
-        <TextInput editable={!sending} multiline onChangeText={setText} placeholder="Write a message..." placeholderTextColor={colors.textSecondary} style={page.input} value={text} />
-        <Pressable
-          disabled={(!text.trim() && selectedMedia.length === 0 && !selectedFile) || sending}
-          onPress={() => void handleSend()}
-          style={[page.send, ((!text.trim() && selectedMedia.length === 0 && !selectedFile) || sending) && page.sendDisabled]}
-        >
-          <Text style={page.sendText}>{sending ? '…' : '↑'}</Text>
-        </Pressable>
-      </View>
+      {isFriend === false ? (
+        <View style={page.lockedNotice}>
+          <Text style={page.lockedNoticeText}>You can only message accepted friends.</Text>
+        </View>
+      ) : (
+        <View style={page.composer}>
+          <Pressable disabled={sending} onPress={handlePickAttachment} style={page.gallery}>
+            <Text style={page.galleryText}>＋</Text>
+          </Pressable>
+          <TextInput editable={!sending} multiline onChangeText={setText} placeholder="Write a message..." placeholderTextColor={colors.textSecondary} style={page.input} value={text} />
+          <Pressable
+            disabled={(!text.trim() && selectedMedia.length === 0 && !selectedFile) || sending}
+            onPress={() => void handleSend()}
+            style={[page.send, ((!text.trim() && selectedMedia.length === 0 && !selectedFile) || sending) && page.sendDisabled]}
+          >
+            <Text style={page.sendText}>{sending ? '…' : '↑'}</Text>
+          </Pressable>
+        </View>
+      )}
     </KeyboardAvoidingView>
   );
 }

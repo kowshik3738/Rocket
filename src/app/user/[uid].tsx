@@ -1,12 +1,12 @@
 import { useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { PostCard } from '@/components/post-card';
 import { Avatar, Card, colors, Screen } from '@/components/rocket-ui';
 import { useAuth } from '@/providers/auth-provider';
 import { getPostCount, Post, subscribeToFeed } from '@/services/posts-service';
-import { getFriends } from '@/services/social-service';
+import { getFriends, getRelationshipStatus, RelationshipStatus, unfriend } from '@/services/social-service';
 import { getProfileColor, getProfileInitials, getUserProfile, UserProfile } from '@/services/user-service';
 
 export default function OtherUserProfileScreen() {
@@ -19,6 +19,9 @@ export default function OtherUserProfileScreen() {
   const [friendCount, setFriendCount] = useState(0);
   const [postCount, setPostCount] = useState(0);
   const [posts, setPosts] = useState<Post[]>([]);
+  const [relationship, setRelationship] = useState<RelationshipStatus | null>(null);
+  const [unfriending, setUnfriending] = useState(false);
+  const [actionError, setActionError] = useState('');
   const [profileLoading, setProfileLoading] = useState(true);
   const [postsLoading, setPostsLoading] = useState(true);
 
@@ -33,6 +36,7 @@ export default function OtherUserProfileScreen() {
     let unsubscribePosts: () => void = () => undefined;
     setProfileLoading(true);
     setPostsLoading(true);
+    setActionError('');
 
     void getUserProfile(safeUid)
       .then((nextProfile) => {
@@ -40,7 +44,14 @@ export default function OtherUserProfileScreen() {
         if (!nextProfile) {
           setFriendCount(0);
           setPostCount(0);
+          setRelationship(null);
           return;
+        }
+
+        if (user?.uid && user.uid !== safeUid) {
+          void getRelationshipStatus(user.uid, safeUid)
+            .then((status) => setRelationship(status))
+            .catch(() => setRelationship(null));
         }
 
         if (user?.uid === safeUid) {
@@ -61,6 +72,7 @@ export default function OtherUserProfileScreen() {
         setProfile(null);
         setFriendCount(0);
         setPostCount(0);
+        setRelationship(null);
       })
       .finally(() => setProfileLoading(false));
 
@@ -96,7 +108,76 @@ export default function OtherUserProfileScreen() {
     color: getProfileColor(profile.uid),
   };
 
-  return <Screen><View style={page.profile}><Avatar user={profileUser} size={88} /><Text style={page.name}>{profile.displayName}</Text><Text style={page.handle}>@{profile.username}</Text>{profile.bio ? <Text style={page.bio}>{profile.bio}</Text> : null}{isOwnProfile ? <View style={page.stats}><View><Text style={page.statNumber}>{postCount}</Text><Text style={page.statLabel}>Posts</Text></View><View><Text style={page.statNumber}>{friendCount}</Text><Text style={page.statLabel}>Friends</Text></View></View> : null}</View>{postsLoading ? <View style={page.postsState}><ActivityIndicator color={colors.accent} size="small" /><Text style={page.postsStateText}>Loading posts...</Text></View> : posts.length === 0 ? <Card style={page.emptyPosts}><Text style={page.emptyPostsText}>No posts yet.</Text></Card> : posts.map((post) => <PostCard key={post.postId} post={post} />)}</Screen>;
+  function handleConfirmUnfriend() {
+    if (!user || !profile || unfriending) return;
+    Alert.alert(
+      'Remove Friend',
+      `Are you sure you want to remove ${profile.displayName} from your friends?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            void executeUnfriend();
+          },
+        },
+      ],
+    );
+  }
+
+  async function executeUnfriend() {
+    if (!user || !profile || unfriending) return;
+    setUnfriending(true);
+    setActionError('');
+    try {
+      await unfriend(user.uid, profile.uid);
+      setRelationship('add');
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Could not remove friend. Check your connection and try again.');
+    } finally {
+      setUnfriending(false);
+    }
+  }
+
+  return (
+    <Screen>
+      <View style={page.profile}>
+        <Avatar user={profileUser} size={88} />
+        <Text style={page.name}>{profile.displayName}</Text>
+        <Text style={page.handle}>@{profile.username}</Text>
+        {profile.bio ? <Text style={page.bio}>{profile.bio}</Text> : null}
+        {isOwnProfile ? (
+          <View style={page.stats}>
+            <View><Text style={page.statNumber}>{postCount}</Text><Text style={page.statLabel}>Posts</Text></View>
+            <View><Text style={page.statNumber}>{friendCount}</Text><Text style={page.statLabel}>Friends</Text></View>
+          </View>
+        ) : null}
+        {!isOwnProfile && relationship === 'friends' ? (
+          <View style={page.actions}>
+            <Pressable
+              disabled={unfriending}
+              onPress={handleConfirmUnfriend}
+              style={[page.unfriendButton, unfriending && page.unfriendButtonDisabled]}
+            >
+              <Text style={page.unfriendButtonText}>{unfriending ? 'Removing...' : 'Remove friend'}</Text>
+            </Pressable>
+          </View>
+        ) : null}
+        {actionError ? <Text style={page.actionError}>{actionError}</Text> : null}
+      </View>
+      {postsLoading ? (
+        <View style={page.postsState}>
+          <ActivityIndicator color={colors.accent} size="small" />
+          <Text style={page.postsStateText}>Loading posts...</Text>
+        </View>
+      ) : posts.length === 0 ? (
+        <Card style={page.emptyPosts}><Text style={page.emptyPostsText}>No posts yet.</Text></Card>
+      ) : (
+        posts.map((post) => <PostCard key={post.postId} post={post} />)
+      )}
+    </Screen>
+  );
 }
 
 const page = StyleSheet.create({
@@ -110,6 +191,11 @@ const page = StyleSheet.create({
   stats: { flexDirection: 'row', gap: 42, marginTop: 25, marginBottom: 29 },
   statNumber: { color: colors.text, textAlign: 'center', fontSize: 18, fontWeight: '900' },
   statLabel: { color: colors.textSecondary, textAlign: 'center', fontSize: 11, marginTop: 5 },
+  actions: { marginTop: 16, marginBottom: 12 },
+  unfriendButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
+  unfriendButtonDisabled: { opacity: 0.5 },
+  unfriendButtonText: { color: colors.accent, fontSize: 13, fontWeight: '800', textAlign: 'center' },
+  actionError: { color: colors.accent, fontSize: 13, textAlign: 'center', marginTop: 8, paddingHorizontal: 20 },
   postsState: { alignItems: 'center', paddingVertical: 18 },
   postsStateText: { color: colors.textSecondary, marginTop: 8, fontSize: 12 },
   emptyPosts: { alignItems: 'center', padding: 22, marginBottom: 18 },

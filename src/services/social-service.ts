@@ -218,6 +218,75 @@ export async function acceptFriendRequest(request: FriendRequest, currentUid: st
   }
 }
 
+export async function unfriend(currentUid: string, otherUid: string): Promise<void> {
+  if (currentUid === otherUid) {
+    throw new Error('You cannot remove yourself as a friend.');
+  }
+
+  const friendshipRef = doc(db, 'friendships', friendshipId(currentUid, otherUid));
+  const outgoingRequestRef = doc(db, 'friendRequests', requestId(currentUid, otherUid));
+  const incomingRequestRef = doc(db, 'friendRequests', requestId(otherUid, currentUid));
+  const currentUserEdgeRef = doc(db, 'userFriends', `${currentUid}_${otherUid}`);
+  const otherUserEdgeRef = doc(db, 'userFriends', `${otherUid}_${currentUid}`);
+
+  await runTransaction(db, async (transaction) => {
+    const [
+      friendshipSnapshot,
+      outgoingRequestSnapshot,
+      incomingRequestSnapshot,
+      currentUserEdgeSnapshot,
+      otherUserEdgeSnapshot,
+    ] = await Promise.all([
+      transaction.get(friendshipRef),
+      transaction.get(outgoingRequestRef),
+      transaction.get(incomingRequestRef),
+      transaction.get(currentUserEdgeRef),
+      transaction.get(otherUserEdgeRef),
+    ]);
+
+    let requestRef = outgoingRequestRef;
+    let requestSnapshot = outgoingRequestSnapshot;
+    if (friendshipSnapshot.exists()) {
+      const linkedRequestId = friendshipSnapshot.data().requestId;
+      if (typeof linkedRequestId !== 'string') {
+        throw new Error('This friendship is no longer valid.');
+      }
+      requestRef = doc(db, 'friendRequests', linkedRequestId);
+      requestSnapshot = linkedRequestId === outgoingRequestRef.id
+        ? outgoingRequestSnapshot
+        : linkedRequestId === incomingRequestRef.id
+          ? incomingRequestSnapshot
+          : await transaction.get(requestRef);
+    } else if (incomingRequestSnapshot.exists() && incomingRequestSnapshot.data().status === 'accepted') {
+      requestRef = incomingRequestRef;
+      requestSnapshot = incomingRequestSnapshot;
+    }
+
+    if (!requestSnapshot.exists() || requestSnapshot.data().status !== 'accepted') {
+      // A concurrent unfriend may already have completed. Treat the now-absent
+      // relationship as a successful, idempotent result.
+      if (!friendshipSnapshot.exists()) return;
+      throw new Error('This friendship is no longer active.');
+    }
+
+    const request = requestSnapshot.data();
+    const matchesParticipants = (request.senderId === currentUid && request.recipientId === otherUid)
+      || (request.senderId === otherUid && request.recipientId === currentUid);
+    if (!matchesParticipants) {
+      throw new Error('This friendship is no longer valid.');
+    }
+
+    transaction.update(requestRef, {
+      status: 'declined',
+      acceptedAt: deleteField(),
+      declinedAt: serverTimestamp(),
+    });
+    if (friendshipSnapshot.exists()) transaction.delete(friendshipRef);
+    if (currentUserEdgeSnapshot.exists()) transaction.delete(currentUserEdgeRef);
+    if (otherUserEdgeSnapshot.exists()) transaction.delete(otherUserEdgeRef);
+  });
+}
+
 export async function declineFriendRequest(request: FriendRequest, currentUid: string): Promise<void> {
   const requestRef = doc(db, 'friendRequests', request.id);
   await runTransaction(db, async (transaction) => {
