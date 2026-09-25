@@ -1,11 +1,12 @@
 import { useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { PostCard } from '@/components/post-card';
 import { Avatar, Card, colors, Screen } from '@/components/rocket-ui';
 import { useAuth } from '@/providers/auth-provider';
 import { getPostCount, Post, subscribeToFeed } from '@/services/posts-service';
+import { REPORT_REASONS, REPORT_REASON_LABELS, ReportReason, reportUser } from '@/services/report-service';
 import { blockUser, getFriends, getRelationshipStatus, RelationshipStatus, unblockUser, unfriend } from '@/services/social-service';
 import { getProfileColor, getProfileInitials, getUserProfile, UserProfile } from '@/services/user-service';
 
@@ -23,6 +24,11 @@ export default function OtherUserProfileScreen() {
   const [unfriending, setUnfriending] = useState(false);
   const [blocking, setBlocking] = useState(false);
   const [unblocking, setUnblocking] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [reportReason, setReportReason] = useState<ReportReason>('spam');
+  const [reportDetails, setReportDetails] = useState('');
+  const [submittingReport, setSubmittingReport] = useState(false);
+  const [reportError, setReportError] = useState('');
   const [actionError, setActionError] = useState('');
   const [profileLoading, setProfileLoading] = useState(true);
   const [postsLoading, setPostsLoading] = useState(true);
@@ -206,6 +212,62 @@ export default function OtherUserProfileScreen() {
     }
   }
 
+  function handleOpenReportModal() {
+    setReportReason('spam');
+    setReportDetails('');
+    setReportError('');
+    setShowReportModal(true);
+  }
+
+  function handleCloseReportModal() {
+    if (submittingReport) return;
+    setShowReportModal(false);
+    setReportError('');
+  }
+
+  async function handleSubmitReport() {
+    if (!user || !profile || submittingReport) return;
+    setSubmittingReport(true);
+    setReportError('');
+
+    try {
+      await reportUser({
+        reporterUid: user.uid,
+        reportedUid: profile.uid,
+        reason: reportReason,
+        details: reportDetails,
+      });
+
+      setShowReportModal(false);
+
+      if (relationship !== 'blocked') {
+        Alert.alert(
+          'Report Submitted',
+          'Report submitted. Would you also like to block this user?',
+          [
+            { text: 'Done', style: 'cancel' },
+            {
+              text: 'Block User',
+              style: 'destructive',
+              onPress: () => {
+                void executeBlock();
+              },
+            },
+          ],
+        );
+      } else {
+        Alert.alert(
+          'Report Submitted',
+          'Report submitted. Thank you for helping keep Rocket safe.',
+        );
+      }
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : 'Could not submit report. Check your connection and try again.');
+    } finally {
+      setSubmittingReport(false);
+    }
+  }
+
   return (
     <Screen>
       <View style={page.profile}>
@@ -222,30 +284,46 @@ export default function OtherUserProfileScreen() {
         {!isOwnProfile ? (
           <View style={page.actions}>
             {relationship === 'blocked' ? (
-              <Pressable
-                disabled={unblocking}
-                onPress={handleConfirmUnblock}
-                style={[page.unblockButton, unblocking && page.actionButtonDisabled]}
-              >
-                <Text style={page.unblockButtonText}>{unblocking ? 'Unblocking...' : 'Unblock user'}</Text>
-              </Pressable>
+              <View style={page.buttonRow}>
+                <Pressable
+                  disabled={unblocking || submittingReport}
+                  onPress={handleConfirmUnblock}
+                  style={[page.unblockButton, (unblocking || submittingReport) && page.actionButtonDisabled]}
+                >
+                  <Text style={page.unblockButtonText}>{unblocking ? 'Unblocking...' : 'Unblock user'}</Text>
+                </Pressable>
+                <Pressable
+                  disabled={unblocking || submittingReport}
+                  onPress={handleOpenReportModal}
+                  style={[page.reportButton, (unblocking || submittingReport) && page.actionButtonDisabled]}
+                >
+                  <Text style={page.reportButtonText}>Report</Text>
+                </Pressable>
+              </View>
             ) : (
               <View style={page.buttonRow}>
                 {relationship === 'friends' ? (
                   <Pressable
-                    disabled={unfriending || blocking}
+                    disabled={unfriending || blocking || submittingReport}
                     onPress={handleConfirmUnfriend}
-                    style={[page.unfriendButton, (unfriending || blocking) && page.actionButtonDisabled]}
+                    style={[page.unfriendButton, (unfriending || blocking || submittingReport) && page.actionButtonDisabled]}
                   >
                     <Text style={page.unfriendButtonText}>{unfriending ? 'Removing...' : 'Remove friend'}</Text>
                   </Pressable>
                 ) : null}
                 <Pressable
-                  disabled={blocking || unfriending}
+                  disabled={blocking || unfriending || submittingReport}
                   onPress={handleConfirmBlock}
-                  style={[page.blockButton, (blocking || unfriending) && page.actionButtonDisabled]}
+                  style={[page.blockButton, (blocking || unfriending || submittingReport) && page.actionButtonDisabled]}
                 >
                   <Text style={page.blockButtonText}>{blocking ? 'Blocking...' : 'Block'}</Text>
+                </Pressable>
+                <Pressable
+                  disabled={blocking || unfriending || submittingReport}
+                  onPress={handleOpenReportModal}
+                  style={[page.reportButton, (blocking || unfriending || submittingReport) && page.actionButtonDisabled]}
+                >
+                  <Text style={page.reportButtonText}>Report</Text>
                 </Pressable>
               </View>
             )}
@@ -265,6 +343,92 @@ export default function OtherUserProfileScreen() {
       ) : (
         posts.map((post) => <PostCard key={post.postId} post={post} />)
       )}
+
+      <Modal
+        animationType="fade"
+        onRequestClose={handleCloseReportModal}
+        transparent
+        visible={showReportModal}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={page.modalOverlay}
+        >
+          <View style={page.modalCard}>
+            <Text style={page.modalTitle}>Report User</Text>
+            <Text style={page.modalSubtitle}>
+              Help us understand why you are reporting @{profile.username}.
+            </Text>
+
+            <ScrollView
+              contentContainerStyle={page.modalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              style={page.modalScrollView}
+            >
+              <Text style={page.modalSectionLabel}>Reason</Text>
+              <View style={page.reasonsList}>
+                {REPORT_REASONS.map((r) => {
+                  const isSelected = reportReason === r;
+                  return (
+                    <Pressable
+                      key={r}
+                      onPress={() => setReportReason(r)}
+                      style={[page.reasonOption, isSelected && page.reasonOptionSelected]}
+                    >
+                      <View style={[page.radioCircle, isSelected && page.radioCircleSelected]}>
+                        {isSelected ? <View style={page.radioInnerDot} /> : null}
+                      </View>
+                      <Text style={[page.reasonText, isSelected && page.reasonTextSelected]}>
+                        {REPORT_REASON_LABELS[r]}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <View style={page.detailsHeader}>
+                <Text style={page.modalSectionLabel}>Details (Optional)</Text>
+                <Text style={page.charCounter}>{reportDetails.length}/500</Text>
+              </View>
+              <TextInput
+                maxLength={500}
+                multiline
+                numberOfLines={3}
+                onChangeText={setReportDetails}
+                placeholder="Provide additional details..."
+                placeholderTextColor={colors.textSecondary}
+                style={page.detailsInput}
+                textAlignVertical="top"
+                value={reportDetails}
+              />
+
+              {reportError ? <Text style={page.modalError}>{reportError}</Text> : null}
+            </ScrollView>
+
+            <View style={page.modalActions}>
+              <Pressable
+                disabled={submittingReport}
+                onPress={handleCloseReportModal}
+                style={[page.modalCancelButton, submittingReport && page.actionButtonDisabled]}
+              >
+                <Text style={page.modalCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                disabled={submittingReport}
+                onPress={handleSubmitReport}
+                style={[page.modalSubmitButton, submittingReport && page.actionButtonDisabled]}
+              >
+                {submittingReport ? (
+                  <ActivityIndicator color="#FFF" size="small" />
+                ) : (
+                  <Text style={page.modalSubmitText}>Submit Report</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </Screen>
   );
 }
@@ -288,10 +452,36 @@ const page = StyleSheet.create({
   blockButtonText: { color: colors.accent, fontSize: 13, fontWeight: '800', textAlign: 'center' },
   unblockButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
   unblockButtonText: { color: colors.text, fontSize: 13, fontWeight: '800', textAlign: 'center' },
+  reportButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
+  reportButtonText: { color: colors.textSecondary, fontSize: 13, fontWeight: '800', textAlign: 'center' },
   actionButtonDisabled: { opacity: 0.5 },
   actionError: { color: colors.accent, fontSize: 13, textAlign: 'center', marginTop: 8, paddingHorizontal: 20 },
   postsState: { alignItems: 'center', paddingVertical: 18 },
   postsStateText: { color: colors.textSecondary, marginTop: 8, fontSize: 12 },
   emptyPosts: { alignItems: 'center', padding: 22, marginBottom: 18 },
   emptyPostsText: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.75)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  modalCard: { width: '100%', maxWidth: 420, maxHeight: '85%', backgroundColor: colors.backgroundElement, borderRadius: 20, borderWidth: 1, borderColor: colors.border, padding: 20 },
+  modalTitle: { color: colors.text, fontSize: 18, fontWeight: '800', textAlign: 'center' },
+  modalSubtitle: { color: colors.textSecondary, fontSize: 13, textAlign: 'center', marginTop: 4, marginBottom: 16 },
+  modalScrollView: { maxHeight: 340 },
+  modalScrollContent: { paddingBottom: 8 },
+  modalSectionLabel: { color: colors.textSecondary, fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.7, marginBottom: 8 },
+  reasonsList: { gap: 8, marginBottom: 16 },
+  reasonOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border },
+  reasonOptionSelected: { borderColor: colors.accent, backgroundColor: colors.backgroundSelected },
+  radioCircle: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.textSecondary, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  radioCircleSelected: { borderColor: colors.accent },
+  radioInnerDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
+  reasonText: { color: colors.textSecondary, fontSize: 14, fontWeight: '600', flex: 1 },
+  reasonTextSelected: { color: colors.text, fontWeight: '700' },
+  detailsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  charCounter: { color: colors.textSecondary, fontSize: 12 },
+  detailsInput: { height: 80, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14 },
+  modalError: { color: colors.accent, fontSize: 12, marginTop: 10, textAlign: 'center' },
+  modalActions: { flexDirection: 'row', gap: 12, marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.border },
+  modalCancelButton: { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: colors.backgroundSelected, alignItems: 'center', justifyContent: 'center' },
+  modalCancelText: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  modalSubmitButton: { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  modalSubmitText: { color: '#FFF', fontSize: 14, fontWeight: '800' },
 });

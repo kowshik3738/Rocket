@@ -75,6 +75,26 @@ service cloud.firestore {
         && resource.data.blockerUid == request.auth.uid;
     }
 
+    match /userReports/{reportId} {
+      allow read: if false;
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasAll(['reporterUid', 'reportedUid', 'reason', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['reporterUid', 'reportedUid', 'reason', 'details', 'createdAt'])
+        && reportId == request.resource.data.reporterUid + '_' + request.resource.data.reportedUid
+        && request.resource.data.reporterUid == request.auth.uid
+        && request.resource.data.reportedUid is string
+        && request.resource.data.reportedUid.size() > 0
+        && request.resource.data.reportedUid != request.auth.uid
+        && exists(/databases/$(database)/documents/users/$(request.resource.data.reportedUid))
+        && request.resource.data.reason in [
+          'spam', 'harassment', 'inappropriate_content', 'impersonation', 'scam', 'other'
+        ]
+        && (!request.resource.data.keys().hasAny(['details'])
+          || (request.resource.data.details is string && request.resource.data.details.size() <= 500))
+        && request.resource.data.createdAt is timestamp;
+      allow update, delete: if false;
+    }
+
     match /friendRequests/{requestId} {
       function noFriendshipExists(senderId, recipientId) {
         return (senderId < recipientId
