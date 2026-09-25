@@ -17,7 +17,8 @@ service cloud.firestore {
         && request.resource.data.bio is string
         && request.resource.data.bio.size() <= 150
         && request.resource.data.usernameLower.matches('^[a-z0-9_.]{3,30}$')
-        && request.resource.data.usernameLower == request.resource.data.username.lower();
+        && request.resource.data.usernameLower == request.resource.data.username.lower()
+        && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.usernameLower)).data.uid == request.auth.uid;
       allow update: if request.auth != null
         && request.auth.uid == userId
         && request.resource.data.uid == resource.data.uid
@@ -457,7 +458,15 @@ service cloud.firestore {
           && request.resource.data.text.size() > 0
           && request.resource.data.text.size() <= 500
           && request.resource.data.createdAt is timestamp;
-        allow update, delete: if request.auth != null && resource.data.authorUid == request.auth.uid;
+        allow update: if request.auth != null
+          && resource.data.authorUid == request.auth.uid
+          && request.resource.data.keys().hasOnly(['authorUid', 'text', 'createdAt'])
+          && request.resource.data.authorUid == resource.data.authorUid
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 500;
+        allow delete: if request.auth != null && resource.data.authorUid == request.auth.uid;
       }
     }
 

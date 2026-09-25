@@ -204,11 +204,15 @@ export default function ChatScreen() {
   const openingFileUrls = useRef(new Set<string>());
   const [openingFileUrl, setOpeningFileUrl] = useState<string | null>(null);
   const openingViewOnceIds = useRef(new Set<string>());
+  const activeViewOnceMessageId = useRef<string | null>(null);
   const viewOnceAvailable = useRef(false);
+  const messagesScrollRef = useRef<ScrollView>(null);
+  const initialScrollPending = useRef(true);
 
   useEffect(() => {
     if (!user || !conversationId) return;
     let active = true;
+    initialScrollPending.current = true;
     setLoading(true);
     setError('');
     void getConversation(conversationId, user.uid)
@@ -230,7 +234,10 @@ export default function ChatScreen() {
         setError(loadError instanceof Error ? loadError.message : 'This conversation could not be loaded.');
         setLoading(false);
     });
-    const unsubscribe = subscribeToMessages(conversationId, setMessages, (messageError) => {
+    const unsubscribe = subscribeToMessages(conversationId, (nextMessages) => {
+      setMessages(nextMessages);
+      if (nextMessages.length === 0) initialScrollPending.current = false;
+    }, (messageError) => {
       if (!active) return;
       const firestoreError = messageError as Error & { code?: string };
       console.error('[Rocket chat Firestore] operation failed', {
@@ -318,24 +325,31 @@ export default function ChatScreen() {
   function handleOpenViewOnce(message: ChatMessage) {
     if (!user || message.senderId === user.uid || message.viewedAt || openingViewOnceIds.current.has(message.id)) return;
     openingViewOnceIds.current.add(message.id);
+    activeViewOnceMessageId.current = message.id;
     viewOnceAvailable.current = false;
     setError('');
     setViewOnceMessage(message);
   }
 
   function closeViewOnceViewer() {
-    if (viewOnceMessage) openingViewOnceIds.current.delete(viewOnceMessage.id);
+    const messageId = activeViewOnceMessageId.current;
+    activeViewOnceMessageId.current = null;
+    if (messageId && !viewOnceAvailable.current) openingViewOnceIds.current.delete(messageId);
     setViewOnceMessage(null);
   }
 
   async function handleViewOnceAvailable() {
-    if (!viewOnceMessage || viewOnceAvailable.current || !user) return;
+    if (!viewOnceMessage || viewOnceAvailable.current || !user || activeViewOnceMessageId.current !== viewOnceMessage.id) return;
     viewOnceAvailable.current = true;
     try {
       await markViewOnceMessageViewed(conversationId, viewOnceMessage.id, user.uid);
     } catch {
+      openingViewOnceIds.current.delete(viewOnceMessage.id);
+      if (activeViewOnceMessageId.current === viewOnceMessage.id) {
+        activeViewOnceMessageId.current = null;
+        setViewOnceMessage(null);
+      }
       setError('This view-once media could not be opened.');
-      closeViewOnceViewer();
     }
   }
 
@@ -552,7 +566,16 @@ export default function ChatScreen() {
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={page.messages} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={page.messages}
+        onContentSizeChange={() => {
+          if (!initialScrollPending.current || messages.length === 0) return;
+          initialScrollPending.current = false;
+          messagesScrollRef.current?.scrollToEnd({ animated: false });
+        }}
+        ref={messagesScrollRef}
+        showsVerticalScrollIndicator={false}
+      >
         {messages.length === 0 ? (
           <View style={page.empty}>
             <Text style={page.emptyTitle}>Start your conversation</Text>
@@ -592,7 +615,7 @@ export default function ChatScreen() {
                       <Image contentFit="contain" source={message.imageUrl} style={page.messageImage} />
                     </Pressable>
                   ) : null}
-                  {message.videoUrl ? <ChatVideo url={message.videoUrl} /> : null}
+                  {!message.viewOnce && message.videoUrl ? <ChatVideo url={message.videoUrl} /> : null}
                   {fileUrl ? (
                     <Pressable disabled={openingFileUrl === fileUrl} onPress={() => void handleOpenFile(fileUrl, message.fileName, message.fileMimeType)} style={page.fileMessage}>
                       <Text style={page.fileIcon}>▣</Text>

@@ -48,7 +48,7 @@ export async function getGroup(groupId: string, uid: string): Promise<Group> {
   return group;
 }
 export function subscribeToGroupMessages(groupId: string, onChange: (messages: GroupMessage[]) => void, onError: (error: Error) => void) {
-  return onSnapshot(query(collection(db, 'groups', groupId, 'messages'), orderBy('createdAt', 'asc'), limit(200)), (snapshot) => onChange(snapshot.docs.map((item) => { const data = item.data(); return { id: item.id, senderId: data.senderId, text: data.text, imageUrl: data.imageUrl ?? null, videoUrl: data.videoUrl ?? null, fileUrl: data.fileUrl ?? null, fileName: data.fileName ?? null, fileSize: data.fileSize ?? null, fileMimeType: data.fileMimeType ?? null, createdAt: data.createdAt ?? null }; })), onError);
+  return onSnapshot(query(collection(db, 'groups', groupId, 'messages'), orderBy('createdAt', 'desc'), limit(200)), (snapshot) => onChange(snapshot.docs.map((item) => { const data = item.data(); return { id: item.id, senderId: data.senderId, text: data.text, imageUrl: data.imageUrl ?? null, videoUrl: data.videoUrl ?? null, fileUrl: data.fileUrl ?? null, fileName: data.fileName ?? null, fileSize: data.fileSize ?? null, fileMimeType: data.fileMimeType ?? null, createdAt: data.createdAt ?? null }; }).reverse()), onError);
 }
 export async function sendGroupMessage(group: Group, senderId: string, text: string, imageUrl?: string | null, videoUrl?: string | null, file?: ChatFile | null) {
   const clean = text.trim(); assertAttachment(clean, imageUrl, videoUrl, file);

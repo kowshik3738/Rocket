@@ -219,7 +219,7 @@ export function subscribeToMessages(
 ): () => void {
   const messagesQuery = query(
     collection(db, 'conversations', conversationId, 'messages'),
-    orderBy('createdAt', 'asc'),
+    orderBy('createdAt', 'desc'),
     limit(200),
   );
   return onSnapshot(messagesQuery, (snapshot) => {
@@ -248,7 +248,7 @@ export function subscribeToMessages(
         callEndedAt: (data.callEndedAt as Timestamp | undefined) ?? null,
         createdAt: (data.createdAt as Timestamp | undefined) ?? null,
       };
-    }));
+    }).reverse());
   }, onError);
 }
 
