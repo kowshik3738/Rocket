@@ -2,6 +2,11 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function noBlockExists(userA, userB) {
+      return !exists(/databases/$(database)/documents/userBlocks/$(userA + '_' + userB))
+        && !exists(/databases/$(database)/documents/userBlocks/$(userB + '_' + userA));
+    }
+
     match /users/{userId} {
       allow read: if request.auth != null;
       allow create: if request.auth != null
@@ -52,6 +57,24 @@ service cloud.firestore {
         && resource.data.uid == request.auth.uid;
     }
 
+    match /userBlocks/{blockId} {
+      allow get: if request.auth != null
+        && (resource == null
+          ? blockId.matches('^' + request.auth.uid + '_.*$')
+          : resource.data.blockerUid == request.auth.uid);
+      allow list: if request.auth != null
+        && resource.data.blockerUid == request.auth.uid;
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['blockerUid', 'blockedUid', 'createdAt'])
+        && blockId == request.resource.data.blockerUid + '_' + request.resource.data.blockedUid
+        && request.resource.data.blockerUid == request.auth.uid
+        && request.resource.data.blockedUid != request.auth.uid
+        && request.resource.data.createdAt is timestamp;
+      allow update: if false;
+      allow delete: if request.auth != null
+        && resource.data.blockerUid == request.auth.uid;
+    }
+
     match /friendRequests/{requestId} {
       function noFriendshipExists(senderId, recipientId) {
         return (senderId < recipientId
@@ -67,7 +90,8 @@ service cloud.firestore {
 
       function canStartFriendRequest(senderId, recipientId) {
         return noFriendshipExists(senderId, recipientId)
-          && hasNoActiveReverseRequest(senderId, recipientId);
+          && hasNoActiveReverseRequest(senderId, recipientId)
+          && noBlockExists(senderId, recipientId);
       }
 
       function hasAuthoritativeFriendshipAfter(friendRequest) {
@@ -110,10 +134,16 @@ service cloud.firestore {
           && ((request.resource.data.status == 'accepted'
             && request.resource.data.acceptedAt is timestamp
             && !request.resource.data.keys().hasAny(['declinedAt'])
+            && noBlockExists(resource.data.senderId, resource.data.recipientId)
             && hasAuthoritativeFriendshipAfter(request.resource.data))
             || (request.resource.data.status == 'declined'
               && request.resource.data.declinedAt is timestamp
               && !request.resource.data.keys().hasAny(['acceptedAt']))))
+          || (resource.data.senderId == request.auth.uid
+            && resource.data.status == 'pending'
+            && request.resource.data.status == 'declined'
+            && request.resource.data.declinedAt is timestamp
+            && !request.resource.data.keys().hasAny(['acceptedAt']))
           || (resource.data.senderId == request.auth.uid
             && resource.data.status == 'declined'
             && request.resource.data.keys().hasOnly(['senderId', 'recipientId', 'status', 'createdAt'])
@@ -149,6 +179,7 @@ service cloud.firestore {
         && request.resource.data.userA != request.resource.data.userB
         && (request.auth.uid == request.resource.data.userA || request.auth.uid == request.resource.data.userB)
         && request.resource.data.createdAt is timestamp
+        && noBlockExists(request.resource.data.userA, request.resource.data.userB)
         && matchesAcceptedFriendRequest(request.resource.data);
       allow update: if false;
       allow delete: if request.auth != null
@@ -166,6 +197,7 @@ service cloud.firestore {
         && request.resource.data.ownerId != request.resource.data.friendId
         && (request.auth.uid == request.resource.data.ownerId || request.auth.uid == request.resource.data.friendId)
         && request.resource.data.createdAt is timestamp
+        && noBlockExists(request.resource.data.ownerId, request.resource.data.friendId)
         && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.status == 'accepted'
         && ((getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.senderId == request.resource.data.ownerId
           && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.recipientId == request.resource.data.friendId)
@@ -199,6 +231,7 @@ service cloud.firestore {
         && request.resource.data.lastMessage == null
         && request.resource.data.lastMessageAt == null
         && request.resource.data.lastMessageSenderId == null
+        && noBlockExists(request.resource.data.participantA, request.resource.data.participantB)
         && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA != null
         && ((get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA == request.resource.data.participantA
           && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userB == request.resource.data.participantB)
@@ -216,6 +249,7 @@ service cloud.firestore {
         && request.resource.data.lastMessage.size() > 0
         && request.resource.data.lastMessageAt is timestamp
         && request.resource.data.lastMessageSenderId == request.auth.uid
+        && noBlockExists(resource.data.participantA, resource.data.participantB)
         && exists(/databases/$(database)/documents/friendships/$(conversationId));
       allow delete: if false;
 
@@ -318,6 +352,7 @@ service cloud.firestore {
             && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.resource.data.recipientId)
             || (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid
             && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.resource.data.recipientId))
+          && noBlockExists(request.resource.data.senderId, request.resource.data.recipientId)
           && exists(/databases/$(database)/documents/friendships/$(conversationId)))
           || validCallHistory(messageId);
         allow update: if request.auth != null
@@ -410,6 +445,7 @@ service cloud.firestore {
         && matchesConversationParticipants(request.resource.data)
         && request.resource.data.callerId == request.auth.uid
         && request.resource.data.phase == 'ringing'
+        && noBlockExists(request.resource.data.callerId, request.resource.data.calleeId)
         && request.resource.data.keys().hasOnly([
           'conversationId', 'callerId', 'calleeId', 'kind', 'phase',
           'offerType', 'offerSdp', 'createdAt'
@@ -436,6 +472,7 @@ service cloud.firestore {
             && resource.data.phase == 'ringing'
             && !resource.data.keys().hasAny(['answerType', 'answerSdp', 'answeredAt'])
             && request.resource.data.phase == 'accepted'
+            && noBlockExists(resource.data.callerId, resource.data.calleeId)
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
               'phase', 'answerType', 'answerSdp', 'answeredAt'
             ])

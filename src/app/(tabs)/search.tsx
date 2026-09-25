@@ -11,6 +11,7 @@ function relationshipLabel(status: RelationshipStatus) {
   if (status === 'friends') return 'Friends';
   if (status === 'sent') return 'Request sent';
   if (status === 'incoming') return 'Incoming request';
+  if (status === 'blocked') return 'Blocked';
   return 'Add friend';
 }
 

@@ -6,7 +6,7 @@ import { PostCard } from '@/components/post-card';
 import { Avatar, Card, colors, Screen } from '@/components/rocket-ui';
 import { useAuth } from '@/providers/auth-provider';
 import { getPostCount, Post, subscribeToFeed } from '@/services/posts-service';
-import { getFriends, getRelationshipStatus, RelationshipStatus, unfriend } from '@/services/social-service';
+import { blockUser, getFriends, getRelationshipStatus, RelationshipStatus, unblockUser, unfriend } from '@/services/social-service';
 import { getProfileColor, getProfileInitials, getUserProfile, UserProfile } from '@/services/user-service';
 
 export default function OtherUserProfileScreen() {
@@ -21,6 +21,8 @@ export default function OtherUserProfileScreen() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [relationship, setRelationship] = useState<RelationshipStatus | null>(null);
   const [unfriending, setUnfriending] = useState(false);
+  const [blocking, setBlocking] = useState(false);
+  const [unblocking, setUnblocking] = useState(false);
   const [actionError, setActionError] = useState('');
   const [profileLoading, setProfileLoading] = useState(true);
   const [postsLoading, setPostsLoading] = useState(true);
@@ -140,6 +142,70 @@ export default function OtherUserProfileScreen() {
     }
   }
 
+  function handleConfirmBlock() {
+    if (!user || !profile || blocking || unfriending) return;
+    Alert.alert(
+      'Block User',
+      `Are you sure you want to block ${profile.displayName}? They will not be able to message you, call you, or see your posts. If you are friends, you will be removed from each other's friend lists.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: () => {
+            void executeBlock();
+          },
+        },
+      ],
+    );
+  }
+
+  async function executeBlock() {
+    if (!user || !profile || blocking || unfriending) return;
+    setBlocking(true);
+    setActionError('');
+    try {
+      await blockUser(user.uid, profile.uid);
+      setRelationship('blocked');
+      setPosts([]);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Could not block user. Check your connection and try again.');
+    } finally {
+      setBlocking(false);
+    }
+  }
+
+  function handleConfirmUnblock() {
+    if (!user || !profile || unblocking) return;
+    Alert.alert(
+      'Unblock User',
+      `Are you sure you want to unblock ${profile.displayName}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unblock',
+          onPress: () => {
+            void executeUnblock();
+          },
+        },
+      ],
+    );
+  }
+
+  async function executeUnblock() {
+    if (!user || !profile || unblocking) return;
+    setUnblocking(true);
+    setActionError('');
+    try {
+      await unblockUser(user.uid, profile.uid);
+      setRelationship('add');
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Could not unblock user. Check your connection and try again.');
+    } finally {
+      setUnblocking(false);
+    }
+  }
+
   return (
     <Screen>
       <View style={page.profile}>
@@ -153,20 +219,43 @@ export default function OtherUserProfileScreen() {
             <View><Text style={page.statNumber}>{friendCount}</Text><Text style={page.statLabel}>Friends</Text></View>
           </View>
         ) : null}
-        {!isOwnProfile && relationship === 'friends' ? (
+        {!isOwnProfile ? (
           <View style={page.actions}>
-            <Pressable
-              disabled={unfriending}
-              onPress={handleConfirmUnfriend}
-              style={[page.unfriendButton, unfriending && page.unfriendButtonDisabled]}
-            >
-              <Text style={page.unfriendButtonText}>{unfriending ? 'Removing...' : 'Remove friend'}</Text>
-            </Pressable>
+            {relationship === 'blocked' ? (
+              <Pressable
+                disabled={unblocking}
+                onPress={handleConfirmUnblock}
+                style={[page.unblockButton, unblocking && page.actionButtonDisabled]}
+              >
+                <Text style={page.unblockButtonText}>{unblocking ? 'Unblocking...' : 'Unblock user'}</Text>
+              </Pressable>
+            ) : (
+              <View style={page.buttonRow}>
+                {relationship === 'friends' ? (
+                  <Pressable
+                    disabled={unfriending || blocking}
+                    onPress={handleConfirmUnfriend}
+                    style={[page.unfriendButton, (unfriending || blocking) && page.actionButtonDisabled]}
+                  >
+                    <Text style={page.unfriendButtonText}>{unfriending ? 'Removing...' : 'Remove friend'}</Text>
+                  </Pressable>
+                ) : null}
+                <Pressable
+                  disabled={blocking || unfriending}
+                  onPress={handleConfirmBlock}
+                  style={[page.blockButton, (blocking || unfriending) && page.actionButtonDisabled]}
+                >
+                  <Text style={page.blockButtonText}>{blocking ? 'Blocking...' : 'Block'}</Text>
+                </Pressable>
+              </View>
+            )}
           </View>
         ) : null}
         {actionError ? <Text style={page.actionError}>{actionError}</Text> : null}
       </View>
-      {postsLoading ? (
+      {relationship === 'blocked' ? (
+        <Card style={page.emptyPosts}><Text style={page.emptyPostsText}>You have blocked this user.</Text></Card>
+      ) : postsLoading ? (
         <View style={page.postsState}>
           <ActivityIndicator color={colors.accent} size="small" />
           <Text style={page.postsStateText}>Loading posts...</Text>
@@ -192,9 +281,14 @@ const page = StyleSheet.create({
   statNumber: { color: colors.text, textAlign: 'center', fontSize: 18, fontWeight: '900' },
   statLabel: { color: colors.textSecondary, textAlign: 'center', fontSize: 11, marginTop: 5 },
   actions: { marginTop: 16, marginBottom: 12 },
+  buttonRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
   unfriendButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
-  unfriendButtonDisabled: { opacity: 0.5 },
   unfriendButtonText: { color: colors.accent, fontSize: 13, fontWeight: '800', textAlign: 'center' },
+  blockButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
+  blockButtonText: { color: colors.accent, fontSize: 13, fontWeight: '800', textAlign: 'center' },
+  unblockButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
+  unblockButtonText: { color: colors.text, fontSize: 13, fontWeight: '800', textAlign: 'center' },
+  actionButtonDisabled: { opacity: 0.5 },
   actionError: { color: colors.accent, fontSize: 13, textAlign: 'center', marginTop: 8, paddingHorizontal: 20 },
   postsState: { alignItems: 'center', paddingVertical: 18 },
   postsStateText: { color: colors.textSecondary, marginTop: 8, fontSize: 12 },

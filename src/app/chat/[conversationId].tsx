@@ -203,6 +203,7 @@ export default function ChatScreen() {
   const [sendingProgress, setSendingProgress] = useState<{ current: number; total: number } | null>(null);
   const [startingCall, setStartingCall] = useState(false);
   const [isFriend, setIsFriend] = useState<boolean | null>(null);
+  const [isBlockedByUser, setIsBlockedByUser] = useState(false);
   const [error, setError] = useState('');
   const openingFileUrls = useRef(new Set<string>());
   const [openingFileUrl, setOpeningFileUrl] = useState<string | null>(null);
@@ -245,6 +246,18 @@ export default function ChatScreen() {
       if (!active) return;
       setIsFriend(false);
     });
+    const otherUid = conversationId.split('_').find((id) => id !== user.uid) || '';
+    let unsubscribeBlock: () => void = () => undefined;
+    if (otherUid) {
+      const blockRef = doc(db, 'userBlocks', `${user.uid}_${otherUid}`);
+      unsubscribeBlock = onSnapshot(blockRef, (snapshot) => {
+        if (!active) return;
+        setIsBlockedByUser(snapshot.exists());
+      }, () => {
+        if (!active) return;
+        setIsBlockedByUser(false);
+      });
+    }
     const unsubscribe = subscribeToMessages(conversationId, (nextMessages) => {
       setMessages(nextMessages);
       if (nextMessages.length === 0) initialScrollPending.current = false;
@@ -264,11 +277,12 @@ export default function ChatScreen() {
       active = false;
       unsubscribe();
       unsubscribeFriendship();
+      unsubscribeBlock();
     };
   }, [conversationId, user]);
 
   async function handlePickMedia() {
-    if (isFriend === false) return;
+    if (isFriend === false || isBlockedByUser) return;
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
       setError('Media library access is required to send photos or videos.');
@@ -294,7 +308,7 @@ export default function ChatScreen() {
   }
 
   async function handleStartVoiceCall() {
-    if (!user || !conversation?.otherUser || startingCall || isFriend === false) return;
+    if (!user || !conversation?.otherUser || startingCall || isFriend === false || isBlockedByUser) return;
     setStartingCall(true);
     setError('');
     try {
@@ -313,7 +327,7 @@ export default function ChatScreen() {
   }
 
   async function handlePickFile() {
-    if (isFriend === false) return;
+    if (isFriend === false || isBlockedByUser) return;
     try {
       const result = await DocumentPicker.getDocumentAsync({
         copyToCacheDirectory: true,
@@ -368,7 +382,7 @@ export default function ChatScreen() {
   }
 
   function handlePickAttachment() {
-    if (isFriend === false) return;
+    if (isFriend === false || isBlockedByUser) return;
     Alert.alert('Add attachment', 'Choose photos, videos, or a file to send.', [
       { text: 'Photos & videos', onPress: () => void handlePickMedia() },
       { text: 'File', onPress: () => void handlePickFile() },
@@ -434,7 +448,7 @@ export default function ChatScreen() {
   }
 
   async function handleSend() {
-    if (!conversation || !user || sending || isFriend === false) return;
+    if (!conversation || !user || sending || isFriend === false || isBlockedByUser) return;
     const canSendText = !!text.trim();
     if (!canSendText && selectedMedia.length === 0 && !selectedFile) return;
     setSending(true);
@@ -578,7 +592,7 @@ export default function ChatScreen() {
           <Text style={page.name}>{otherUser.displayName}</Text>
           <Text style={page.handle}>@{otherUser.username}</Text>
         </View>
-        <Pressable accessibilityLabel="Start voice call" disabled={startingCall || isFriend === false} onPress={() => void handleStartVoiceCall()} style={[page.callButton, (startingCall || isFriend === false) && page.callButtonDisabled]}>
+        <Pressable accessibilityLabel="Start voice call" disabled={startingCall || isFriend === false || isBlockedByUser} onPress={() => void handleStartVoiceCall()} style={[page.callButton, (startingCall || isFriend === false || isBlockedByUser) && page.callButtonDisabled]}>
           <Text style={page.callButtonText}>{startingCall ? '…' : '☎'}</Text>
         </Pressable>
       </View>
@@ -707,7 +721,11 @@ export default function ChatScreen() {
         </View>
       ) : null}
 
-      {isFriend === false ? (
+      {isBlockedByUser ? (
+        <View style={page.lockedNotice}>
+          <Text style={page.lockedNoticeText}>You have blocked this user.</Text>
+        </View>
+      ) : isFriend === false ? (
         <View style={page.lockedNotice}>
           <Text style={page.lockedNoticeText}>You can only message accepted friends.</Text>
         </View>

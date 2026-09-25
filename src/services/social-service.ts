@@ -1,22 +1,30 @@
 import {
-    collection,
-    deleteField,
-    doc,
-    getDoc,
-    getDocs,
-    limit,
-    query,
-    runTransaction,
-    serverTimestamp,
-    Timestamp,
-    where,
+  collection,
+  deleteDoc,
+  deleteField,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  query,
+  runTransaction,
+  serverTimestamp,
+  Timestamp,
+  where,
 } from 'firebase/firestore';
 
 import { db } from '@/lib/firebase';
 import { getUserProfile, UserProfile } from '@/services/user-service';
 
 export type FriendRequestStatus = 'pending' | 'accepted' | 'declined';
-export type RelationshipStatus = 'add' | 'sent' | 'incoming' | 'friends';
+export type RelationshipStatus = 'add' | 'sent' | 'incoming' | 'friends' | 'blocked';
+
+export type UserBlock = {
+  id: string;
+  blockerUid: string;
+  blockedUid: string;
+  createdAt: Timestamp | null;
+};
 
 export type FriendRequest = {
   id: string;
@@ -41,6 +49,10 @@ function friendshipId(firstUid: string, secondUid: string) {
   return [firstUid, secondUid].sort().join('_');
 }
 
+function blockId(blockerUid: string, blockedUid: string) {
+  return `${blockerUid}_${blockedUid}`;
+}
+
 function profileFromSnapshot(snapshot: { id: string; data: () => Record<string, unknown> }): UserProfile {
   const data = snapshot.data();
   return {
@@ -51,6 +63,36 @@ function profileFromSnapshot(snapshot: { id: string; data: () => Record<string, 
     bio: (data.bio as string | undefined) ?? '',
     createdAt: (data.createdAt as Timestamp | undefined) ?? null,
   };
+}
+
+export async function getBlockedUids(currentUid: string): Promise<string[]> {
+  try {
+    const blocksQuery = query(
+      collection(db, 'userBlocks'),
+      where('blockerUid', '==', currentUid),
+      limit(100),
+    );
+    const snapshot = await getDocs(blocksQuery);
+    return snapshot.docs.map((blockDoc) => blockDoc.data().blockedUid as string);
+  } catch {
+    return [];
+  }
+}
+
+export async function getBlockedUsers(currentUid: string): Promise<UserProfile[]> {
+  const uids = await getBlockedUids(currentUid);
+  const profiles = await Promise.all(uids.map((uid) => getUserProfile(uid)));
+  return profiles.filter((profile): profile is UserProfile => profile !== null);
+}
+
+export async function isUserBlocked(currentUid: string, targetUid: string): Promise<boolean> {
+  try {
+    const blockRef = doc(db, 'userBlocks', blockId(currentUid, targetUid));
+    const snapshot = await getDoc(blockRef);
+    return snapshot.exists();
+  } catch {
+    return false;
+  }
 }
 
 export async function searchUsers(searchTerm: string, currentUid: string): Promise<UserProfile[]> {
@@ -66,10 +108,14 @@ export async function searchUsers(searchTerm: string, currentUid: string): Promi
       where('usernameLower', '<=', `${normalizedSearch}\uf8ff`),
       limit(20),
     );
-    const snapshot = await getDocs(usersQuery);
+    const [snapshot, blockedUids] = await Promise.all([
+      getDocs(usersQuery),
+      getBlockedUids(currentUid),
+    ]);
+    const blockedSet = new Set(blockedUids);
     const profiles = snapshot.docs
       .map(profileFromSnapshot)
-      .filter((profile) => profile.uid !== currentUid);
+      .filter((profile) => profile.uid !== currentUid && !blockedSet.has(profile.uid));
     return profiles;
   } catch (error) {
     throw error;
@@ -77,7 +123,13 @@ export async function searchUsers(searchTerm: string, currentUid: string): Promi
 }
 
 export async function getRelationshipStatus(currentUid: string, otherUid: string): Promise<RelationshipStatus> {
-  const friendshipSnapshot = await getDoc(doc(db, 'friendships', friendshipId(currentUid, otherUid)));
+  const [friendshipSnapshot, blockSnapshot] = await Promise.all([
+    getDoc(doc(db, 'friendships', friendshipId(currentUid, otherUid))),
+    getDoc(doc(db, 'userBlocks', blockId(currentUid, otherUid))),
+  ]);
+  if (blockSnapshot.exists()) {
+    return 'blocked';
+  }
   if (friendshipSnapshot.exists()) {
     return 'friends';
   }
@@ -111,13 +163,18 @@ export async function sendFriendRequest(senderId: string, recipientId: string): 
   const outgoingRef = doc(db, 'friendRequests', requestId(senderId, recipientId));
   const incomingRef = doc(db, 'friendRequests', requestId(recipientId, senderId));
   const friendshipRef = doc(db, 'friendships', friendshipId(senderId, recipientId));
+  const blockRef = doc(db, 'userBlocks', blockId(senderId, recipientId));
 
   await runTransaction(db, async (transaction) => {
-    const [outgoing, incoming, friendship] = await Promise.all([
+    const [outgoing, incoming, friendship, block] = await Promise.all([
       transaction.get(outgoingRef),
       transaction.get(incomingRef),
       transaction.get(friendshipRef),
+      transaction.get(blockRef),
     ]);
+    if (block.exists()) {
+      throw new Error('You have blocked this user. Unblock them first to send a friend request.');
+    }
     if (friendship.exists()) {
       throw new Error('You are already friends.');
     }
@@ -185,7 +242,14 @@ export async function acceptFriendRequest(request: FriendRequest, currentUid: st
       }
 
       const friendshipRef = doc(db, 'friendships', friendshipId(senderId, recipientId));
-      const friendshipSnapshot = await transaction.get(friendshipRef);
+      const blockRef = doc(db, 'userBlocks', blockId(currentUid, senderId));
+      const [friendshipSnapshot, blockSnapshot] = await Promise.all([
+        transaction.get(friendshipRef),
+        transaction.get(blockRef),
+      ]);
+      if (blockSnapshot.exists()) {
+        throw new Error('You have blocked this user.');
+      }
       if (friendshipSnapshot.exists()) {
         throw new Error('You are already friends.');
       }
@@ -285,6 +349,104 @@ export async function unfriend(currentUid: string, otherUid: string): Promise<vo
     if (currentUserEdgeSnapshot.exists()) transaction.delete(currentUserEdgeRef);
     if (otherUserEdgeSnapshot.exists()) transaction.delete(otherUserEdgeRef);
   });
+}
+
+export async function blockUser(currentUid: string, targetUid: string): Promise<void> {
+  if (currentUid === targetUid) {
+    throw new Error('You cannot block yourself.');
+  }
+
+  const targetBlockRef = doc(db, 'userBlocks', blockId(currentUid, targetUid));
+  const friendshipRef = doc(db, 'friendships', friendshipId(currentUid, targetUid));
+  const outgoingRequestRef = doc(db, 'friendRequests', requestId(currentUid, targetUid));
+  const incomingRequestRef = doc(db, 'friendRequests', requestId(targetUid, currentUid));
+  const currentUserEdgeRef = doc(db, 'userFriends', `${currentUid}_${targetUid}`);
+  const otherUserEdgeRef = doc(db, 'userFriends', `${targetUid}_${currentUid}`);
+
+  await runTransaction(db, async (transaction) => {
+    const [
+      blockSnapshot,
+      friendshipSnapshot,
+      outgoingRequestSnapshot,
+      incomingRequestSnapshot,
+      currentUserEdgeSnapshot,
+      otherUserEdgeSnapshot,
+    ] = await Promise.all([
+      transaction.get(targetBlockRef),
+      transaction.get(friendshipRef),
+      transaction.get(outgoingRequestRef),
+      transaction.get(incomingRequestRef),
+      transaction.get(currentUserEdgeRef),
+      transaction.get(otherUserEdgeRef),
+    ]);
+
+    if (blockSnapshot.exists()) {
+      return;
+    }
+
+    let linkedRequestRef = outgoingRequestRef;
+    let linkedRequestSnapshot = outgoingRequestSnapshot;
+
+    if (friendshipSnapshot.exists()) {
+      const linkedRequestId = friendshipSnapshot.data().requestId;
+      if (typeof linkedRequestId !== 'string') {
+        throw new Error('This friendship is no longer valid.');
+      }
+      linkedRequestRef = doc(db, 'friendRequests', linkedRequestId);
+      linkedRequestSnapshot = linkedRequestId === outgoingRequestRef.id
+        ? outgoingRequestSnapshot
+        : linkedRequestId === incomingRequestRef.id
+          ? incomingRequestSnapshot
+          : await transaction.get(linkedRequestRef);
+    } else if (incomingRequestSnapshot.exists() && incomingRequestSnapshot.data().status === 'accepted') {
+      linkedRequestRef = incomingRequestRef;
+      linkedRequestSnapshot = incomingRequestSnapshot;
+    }
+
+    if (linkedRequestSnapshot.exists() && linkedRequestSnapshot.data().status === 'accepted') {
+      transaction.update(linkedRequestRef, {
+        status: 'declined',
+        acceptedAt: deleteField(),
+        declinedAt: serverTimestamp(),
+      });
+      if (friendshipSnapshot.exists()) transaction.delete(friendshipRef);
+      if (currentUserEdgeSnapshot.exists()) transaction.delete(currentUserEdgeRef);
+      if (otherUserEdgeSnapshot.exists()) transaction.delete(otherUserEdgeRef);
+    } else {
+      if (friendshipSnapshot.exists()) transaction.delete(friendshipRef);
+      if (currentUserEdgeSnapshot.exists()) transaction.delete(currentUserEdgeRef);
+      if (otherUserEdgeSnapshot.exists()) transaction.delete(otherUserEdgeRef);
+    }
+
+    if (outgoingRequestSnapshot.exists() && outgoingRequestSnapshot.data().status === 'pending') {
+      transaction.update(outgoingRequestRef, {
+        status: 'declined',
+        declinedAt: serverTimestamp(),
+      });
+    }
+
+    if (incomingRequestSnapshot.exists() && incomingRequestSnapshot.data().status === 'pending') {
+      transaction.update(incomingRequestRef, {
+        status: 'declined',
+        declinedAt: serverTimestamp(),
+      });
+    }
+
+    transaction.set(targetBlockRef, {
+      blockerUid: currentUid,
+      blockedUid: targetUid,
+      createdAt: serverTimestamp(),
+    });
+  });
+}
+
+export async function unblockUser(currentUid: string, targetUid: string): Promise<void> {
+  if (currentUid === targetUid) {
+    throw new Error('You cannot unblock yourself.');
+  }
+
+  const targetBlockRef = doc(db, 'userBlocks', blockId(currentUid, targetUid));
+  await deleteDoc(targetBlockRef);
 }
 
 export async function declineFriendRequest(request: FriendRequest, currentUid: string): Promise<void> {

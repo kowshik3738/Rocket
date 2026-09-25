@@ -125,12 +125,17 @@ export async function createOrGetConversation(currentUid: string, friendUid: str
   const conversationId = getConversationId(currentUid, friendUid);
   const conversationRef = doc(db, 'conversations', conversationId);
   const friendshipRef = doc(db, 'friendships', conversationId);
+  const blockRef = doc(db, 'userBlocks', `${currentUid}_${friendUid}`);
 
   await runTransaction(db, async (transaction) => {
-    const [friendshipSnapshot, conversationSnapshot] = await Promise.all([
+    const [friendshipSnapshot, conversationSnapshot, blockSnapshot] = await Promise.all([
       transaction.get(friendshipRef),
       transaction.get(conversationRef),
+      transaction.get(blockRef),
     ]);
+    if (blockSnapshot.exists()) {
+      throw new Error('You have blocked this user.');
+    }
     if (!friendshipSnapshot.exists()) {
       throw new Error('You can only message accepted friends.');
     }
@@ -318,14 +323,19 @@ export async function sendMessage(
   const recipientId = conversation.participantA === senderId ? conversation.participantB : conversation.participantA;
   const conversationRef = doc(db, 'conversations', conversation.id);
   const friendshipRef = doc(db, 'friendships', conversation.id);
+  const blockRef = doc(db, 'userBlocks', `${senderId}_${recipientId}`);
   const messageRef = doc(collection(db, 'conversations', conversation.id, 'messages'));
   await runTransaction(db, async (transaction) => {
-    const [conversationSnapshot, friendshipSnapshot] = await Promise.all([
+    const [conversationSnapshot, friendshipSnapshot, blockSnapshot] = await Promise.all([
       transaction.get(conversationRef),
       transaction.get(friendshipRef),
+      transaction.get(blockRef),
     ]);
     if (!conversationSnapshot.exists()) {
       throw new Error('This conversation is no longer available.');
+    }
+    if (blockSnapshot.exists()) {
+      throw new Error('You have blocked this user.');
     }
     if (!friendshipSnapshot.exists()) {
       throw new Error('You can only message accepted friends.');
