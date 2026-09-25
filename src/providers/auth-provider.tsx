@@ -2,6 +2,7 @@ import {
     createUserWithEmailAndPassword,
     signOut as firebaseSignOut,
     onAuthStateChanged,
+    sendPasswordResetEmail,
     signInWithEmailAndPassword,
     User,
 } from 'firebase/auth';
@@ -25,6 +26,7 @@ type AuthContextValue = {
   profileError: string | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<void>;
   signUp: (displayName: string, username: string, email: string, password: string) => Promise<void>;
   updateProfile: (displayName: string, username: string, bio: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -73,6 +75,30 @@ export function AuthProvider({ children }: PropsWithChildren) {
           await signInWithEmailAndPassword(auth, email.trim(), password);
         } catch (error) {
           throw new Error(getAuthErrorMessage(error));
+        }
+      },
+      sendPasswordReset: async (email) => {
+        try {
+          await sendPasswordResetEmail(auth, email.trim());
+        } catch (error) {
+          const code = typeof error === 'object' && error !== null && 'code' in error
+            ? (error as { code?: string }).code
+            : undefined;
+
+          // Firebase projects without email-enumeration protection can return
+          // this error. Treat it as success so Rocket does not disclose which
+          // email addresses have accounts.
+          if (code === 'auth/user-not-found') return;
+          if (code === 'auth/too-many-requests') {
+            throw new Error('Too many reset requests. Please wait a moment and try again.');
+          }
+          if (code === 'auth/network-request-failed') {
+            throw new Error('Network error. Check your connection and try again.');
+          }
+          if (code === 'auth/operation-not-allowed') {
+            throw new Error('Password reset is not available right now. Please contact support.');
+          }
+          throw new Error('We could not send reset instructions. Please try again.');
         }
       },
       signUp: async (displayName, username, email, password) => {

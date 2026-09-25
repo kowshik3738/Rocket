@@ -29,7 +29,7 @@ function AppNavigator() {
     }
 
     const firstSegment = segments[0] as string | undefined;
-    const publicRoute = firstSegment === 'welcome' || firstSegment === 'sign-in' || firstSegment === 'create-account';
+    const publicRoute = firstSegment === 'welcome' || firstSegment === 'sign-in' || firstSegment === 'create-account' || firstSegment === 'forgot-password';
     const protectedRoute = firstSegment === '(tabs)' || firstSegment === 'friends' || firstSegment === 'settings' || firstSegment === 'edit-profile' || firstSegment === 'chat' || firstSegment === 'call' || firstSegment === 'group';
 
     if (user && publicRoute) {
@@ -55,6 +55,7 @@ function AppNavigator() {
     <Stack screenOptions={{ headerShown: false, animation: 'fade' }}>
       <Stack.Screen name="welcome" />
       <Stack.Screen name="sign-in" />
+      <Stack.Screen name="forgot-password" />
       <Stack.Screen name="create-account" />
       <Stack.Screen name="(tabs)" />
       <Stack.Screen name="friends" />
