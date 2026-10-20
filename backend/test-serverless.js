@@ -78,7 +78,7 @@ test('Serverless entry point (api/index.js) exports valid Express application', 
   assert.strictEqual(typeof serverlessApp.listen, 'function');
 });
 
-test('Health check endpoint /health returns 200 OK with valid service payload', async () => {
+test('Health check endpoint /health returns 200 OK with valid service payload and safe diagnostics', async () => {
   const response = await simulateRequest(serverlessApp, {
     method: 'GET',
     url: '/health',
@@ -88,6 +88,11 @@ test('Health check endpoint /health returns 200 OK with valid service payload', 
   assert.strictEqual(response.json?.status, 'ok');
   assert.strictEqual(response.json?.service, 'rocket-notification-backend');
   assert.ok(response.json?.timestamp);
+  assert.ok(response.json?.firebase);
+  assert.strictEqual(typeof response.json?.firebase?.credentialsConfigured, 'boolean');
+  assert.strictEqual(typeof response.json?.firebase?.authMethod, 'string');
+  assert.strictEqual(response.body.includes('PRIVATE KEY'), false, 'Health check must never leak private keys');
+  assert.strictEqual(response.body.includes('private_key'), false, 'Health check must never leak private keys');
 });
 
 test('Health check alias /api/health returns 200 OK for Vercel route compatibility', async () => {

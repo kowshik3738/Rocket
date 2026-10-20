@@ -39,43 +39,162 @@ try {
   console.warn('[Rocket Backend] firebase-admin is not installed in local environment. Run `npm install` inside backend/ before deploying.');
 }
 
+// Firebase Admin Initialization Status & Safe Diagnostics
+let firebaseInitStatus = {
+  initialized: false,
+  credentialConfigured: false,
+  authMethod: 'none',
+  projectId: process.env.FIREBASE_PROJECT_ID || 'rocket-87c6a',
+  error: null,
+};
+
+function parseServiceAccountString(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  let str = raw.trim();
+
+  // Strip leading and trailing matching quotes if user wrapped the value in quotes
+  if ((str.startsWith("'") && str.endsWith("'")) || (str.startsWith('"') && str.endsWith('"'))) {
+    str = str.slice(1, -1).trim();
+  }
+
+  // Support base64-encoded JSON string
+  if (!str.startsWith('{') && !str.startsWith('[')) {
+    try {
+      const decoded = Buffer.from(str, 'base64').toString('utf8').trim();
+      if (decoded.startsWith('{')) {
+        str = decoded;
+      }
+    } catch {}
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(str);
+  } catch (err) {
+    throw new Error(`FIREBASE_SERVICE_ACCOUNT is not valid JSON: ${err.message}`);
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('FIREBASE_SERVICE_ACCOUNT JSON must be an object.');
+  }
+
+  if (!parsed.project_id || !parsed.client_email || !parsed.private_key) {
+    throw new Error('FIREBASE_SERVICE_ACCOUNT is missing required fields (project_id, client_email, private_key).');
+  }
+
+  // Normalize literal \n in private_key if double-escaped
+  if (typeof parsed.private_key === 'string') {
+    parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
+  }
+
+  return parsed;
+}
+
 // Initialize Firebase Admin SDK
 function initializeFirebase() {
-  if (!admin) return null;
-  if (admin.apps && admin.apps.length > 0) return admin.app();
+  if (!admin) {
+    firebaseInitStatus.error = 'firebase-admin package is not available';
+    return null;
+  }
+  if (admin.apps && admin.apps.length > 0) {
+    firebaseInitStatus.initialized = true;
+    return admin.app();
+  }
 
+  // 1. Local file credential (local development only)
   const localKeyPath = path.join(__dirname, 'serviceAccountKey.json');
   if (fs.existsSync(localKeyPath)) {
     try {
       const fileData = JSON.parse(fs.readFileSync(localKeyPath, 'utf8'));
-      return admin.initializeApp({
+      const app = admin.initializeApp({
         credential: admin.credential.cert(fileData),
       });
+      firebaseInitStatus = {
+        initialized: true,
+        credentialConfigured: true,
+        authMethod: 'local_service_account_file',
+        projectId: fileData.project_id || process.env.FIREBASE_PROJECT_ID || 'rocket-87c6a',
+        error: null,
+      };
+      return app;
     } catch (err) {
       console.warn('[Rocket Backend] Could not parse serviceAccountKey.json:', err.message);
     }
   }
 
+  // 2. Full Service Account JSON from Environment Variable
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    return admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
+    try {
+      const serviceAccount = parseServiceAccountString(process.env.FIREBASE_SERVICE_ACCOUNT);
+      const app = admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+      });
+      firebaseInitStatus = {
+        initialized: true,
+        credentialConfigured: true,
+        authMethod: 'service_account_env_json',
+        projectId: serviceAccount.project_id || process.env.FIREBASE_PROJECT_ID || 'rocket-87c6a',
+        error: null,
+      };
+      return app;
+    } catch (err) {
+      console.error('[Rocket Backend] FIREBASE_SERVICE_ACCOUNT initialization failed:', err.message);
+      firebaseInitStatus.error = err.message;
+      return null;
+    }
   }
 
+  // 3. Individual Credentials from Environment Variables
   if (process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
-    return admin.initializeApp({
-      credential: admin.credential.cert({
+    try {
+      let rawKey = process.env.FIREBASE_PRIVATE_KEY.trim();
+      if ((rawKey.startsWith("'") && rawKey.endsWith("'")) || (rawKey.startsWith('"') && rawKey.endsWith('"'))) {
+        rawKey = rawKey.slice(1, -1);
+      }
+      const formattedKey = rawKey.replace(/\\n/g, '\n');
+      const PEM_HEADER = ['-----BEGIN', 'PRIVATE KEY-----'].join(' ');
+      if (!formattedKey.includes(PEM_HEADER)) {
+        throw new Error(`FIREBASE_PRIVATE_KEY is missing valid PEM header (${PEM_HEADER}).`);
+      }
+      const app = admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: process.env.FIREBASE_PROJECT_ID || 'rocket-87c6a',
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL.trim(),
+          privateKey: formattedKey,
+        }),
+      });
+      firebaseInitStatus = {
+        initialized: true,
+        credentialConfigured: true,
+        authMethod: 'service_account_individual_env',
         projectId: process.env.FIREBASE_PROJECT_ID || 'rocket-87c6a',
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-      }),
-    });
+        error: null,
+      };
+      return app;
+    } catch (err) {
+      console.error('[Rocket Backend] FIREBASE_PRIVATE_KEY initialization failed:', err.message);
+      firebaseInitStatus.error = err.message;
+      return null;
+    }
   }
 
-  return admin.initializeApp({
-    projectId: process.env.FIREBASE_PROJECT_ID || 'rocket-87c6a',
-  });
+  // 4. Default initialization (ADC or test environment)
+  try {
+    const app = admin.initializeApp({
+      projectId: process.env.FIREBASE_PROJECT_ID || 'rocket-87c6a',
+    });
+    firebaseInitStatus = {
+      initialized: true,
+      credentialConfigured: false,
+      authMethod: 'adc_fallback_uncredentialed',
+      projectId: process.env.FIREBASE_PROJECT_ID || 'rocket-87c6a',
+      error: 'Running without explicit Firebase service account credentials. FCM and Firestore operations will fail unless GCP metadata is available.',
+    };
+    return app;
+  } catch (err) {
+    firebaseInitStatus.error = err.message;
+    return null;
+  }
 }
 
 const app = express();
@@ -256,6 +375,13 @@ const healthHandler = (req, res) => {
     status: 'ok',
     service: 'rocket-notification-backend',
     environment: process.env.VERCEL ? 'vercel-serverless' : 'node',
+    firebase: {
+      initialized: firebaseInitStatus.initialized,
+      credentialsConfigured: firebaseInitStatus.credentialConfigured,
+      authMethod: firebaseInitStatus.authMethod,
+      projectId: firebaseInitStatus.projectId,
+      ...(firebaseInitStatus.error ? { warning: firebaseInitStatus.error } : {}),
+    },
     timestamp: new Date().toISOString(),
   });
 };
@@ -312,6 +438,14 @@ function isTimestampRecent(timestamp, maxAgeSeconds = 120) {
 // Main Notification Dispatch Endpoint
 // =============================================================================
 app.post(['/api/notify', '/notify'], authenticateUser, async (req, res) => {
+  // Guard: Ensure Firebase Admin is credentialed in production
+  if (!firebaseInitStatus.credentialConfigured && process.env.NODE_ENV !== 'test') {
+    return res.status(503).json({
+      error: 'Firebase Admin credentials are not configured on this server. Push notifications cannot be processed.',
+      details: firebaseInitStatus.error || 'Missing FIREBASE_SERVICE_ACCOUNT or FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY.',
+    });
+  }
+
   const callerUid = req.user.uid;
 
   // 1. Rate Limiting Check
@@ -805,3 +939,5 @@ module.exports.isTimestampRecent = isTimestampRecent;
 module.exports.getUserDisplayName = getUserDisplayName;
 module.exports.isBlocked = isBlocked;
 module.exports.authenticateUser = authenticateUser;
+module.exports.parseServiceAccountString = parseServiceAccountString;
+module.exports.getFirebaseInitStatus = () => ({ ...firebaseInitStatus });

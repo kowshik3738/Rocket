@@ -187,3 +187,44 @@ test('Device preference filtering respects muted categories', () => {
   const forSocial = filterDevices(devices, 'social');
   assert.deepStrictEqual(forSocial.map((d) => d.id), ['tablet', 'watch']);
 });
+
+// 9. Test Service Account Parsing & Diagnostics
+const { parseServiceAccountString } = require('./server');
+
+test('parseServiceAccountString correctly parses JSON, quoted strings, base64, and rejects malformed inputs', () => {
+  const validObj = {
+    project_id: 'rocket-87c6a',
+    client_email: 'service-account@rocket-87c6a.iam.gserviceaccount.com',
+    private_key: '-----BEGIN MOCK KEY-----\\nmock_key_value_for_unit_test\\n-----END MOCK KEY-----\\n',
+  };
+
+  // Plain JSON string
+  const plain = parseServiceAccountString(JSON.stringify(validObj));
+  assert.strictEqual(plain.project_id, 'rocket-87c6a');
+  assert.strictEqual(plain.client_email, validObj.client_email);
+  assert.ok(plain.private_key.includes('\n'), 'Double-escaped newlines must be normalized to real newlines');
+
+  // Single-quoted JSON string (e.g. copied from .env)
+  const singleQuoted = parseServiceAccountString(`'${JSON.stringify(validObj)}'`);
+  assert.strictEqual(singleQuoted.project_id, 'rocket-87c6a');
+
+  // Double-quoted JSON string
+  const doubleQuoted = parseServiceAccountString(`"${JSON.stringify(validObj)}"`);
+  assert.strictEqual(doubleQuoted.project_id, 'rocket-87c6a');
+
+  // Base64-encoded JSON string
+  const b64 = parseServiceAccountString(Buffer.from(JSON.stringify(validObj)).toString('base64'));
+  assert.strictEqual(b64.project_id, 'rocket-87c6a');
+
+  // Rejects invalid JSON
+  assert.throws(
+    () => parseServiceAccountString('not_valid_json'),
+    /is not valid JSON/
+  );
+
+  // Rejects JSON missing required fields
+  assert.throws(
+    () => parseServiceAccountString(JSON.stringify({ project_id: 'test' })),
+    /missing required fields/
+  );
+});

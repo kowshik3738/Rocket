@@ -336,15 +336,19 @@ export type PushNotificationPayload = {
   data: Record<string, string>;
 };
 
+export const PRODUCTION_NOTIFICATION_BACKEND_URL = 'https://rocket-notifications.vercel.app';
+
 /**
  * Dispatches an FCM push notification request to the external backend service.
  * The backend authenticates the caller via Firebase Auth ID token and sends
  * the message via FCM HTTP v1 without exposing service account credentials to client code.
  *
- * If EXPO_PUBLIC_NOTIFICATION_BACKEND_URL is not set, this cleanly no-ops.
+ * Uses EXPO_PUBLIC_NOTIFICATION_BACKEND_URL if set, falling back to the permanent
+ * production Vercel notification backend URL (https://rocket-notifications.vercel.app).
  */
 export async function dispatchPushNotification(payload: PushNotificationPayload): Promise<void> {
-  const backendUrl = process.env.EXPO_PUBLIC_NOTIFICATION_BACKEND_URL;
+  const backendUrl =
+    process.env.EXPO_PUBLIC_NOTIFICATION_BACKEND_URL || PRODUCTION_NOTIFICATION_BACKEND_URL;
   if (!backendUrl) return;
 
   const currentUser = auth.currentUser;
@@ -352,7 +356,8 @@ export async function dispatchPushNotification(payload: PushNotificationPayload)
 
   try {
     const idToken = await currentUser.getIdToken();
-    await fetch(`${backendUrl.replace(/\/$/, '')}/api/notify`, {
+    const endpoint = `${backendUrl.replace(/\/$/, '')}/api/notify`;
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -360,6 +365,11 @@ export async function dispatchPushNotification(payload: PushNotificationPayload)
       },
       body: JSON.stringify(payload),
     });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      console.warn(`[Rocket notifications] backend returned HTTP ${response.status}: ${errorText}`);
+    }
   } catch (error) {
     console.warn('[Rocket notifications] could not dispatch push notification to backend', error);
   }
