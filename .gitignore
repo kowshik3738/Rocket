@@ -13,25 +13,56 @@ expo-env.d.ts
 .kotlin/
 *.orig.*
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key
+key.properties
+keystore.properties
 *.mobileprovision
 
 # Metro
 .metro-health-check*
 
-# debug
+# debug & logs
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+*.log
+firestore-debug.log
+firebase-debug.log
+
+# Vercel
+.vercel/
+
+# Local scratch and patch scripts
+scratch/
+patch*.sh
+patch*.py
+wait.sh
+*.patch.backup
+
+# Local agent tools & lockfiles
+.agents/
+skills-lock.json
 
 # macOS
 .DS_Store
 *.pem
 
+# Secrets and service account credentials
+*serviceAccount*.json
+*service-account*.json
+serviceAccountKey*.json
+backend/serviceAccountKey.json
+backend/.env*
+!backend/.env.example
+
 # local env files
+.env
+.env.*
 .env*.local
+!.env.example
 
 # typescript
 *.tsbuildinfo
@@ -41,3 +72,4 @@ example
 # generated native folders
 /ios
 /android
+

@@ -2,18 +2,159 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isVerifiedUser() {
+      return request.auth != null
+        && request.auth.token.email_verified == true;
+    }
+
     function noBlockExists(userA, userB) {
       return !exists(/databases/$(database)/documents/userBlocks/$(userA + '_' + userB))
         && !exists(/databases/$(database)/documents/userBlocks/$(userB + '_' + userA));
     }
 
+
+    match /privacyLists/{userId} {
+      allow read: if isVerifiedUser() && request.auth.uid == userId;
+      allow create, update: if isVerifiedUser()
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly(['ownerUid', 'closeFriends', 'hiddenFrom', 'updatedAt'])
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.closeFriends is list
+        && request.resource.data.closeFriends.size() <= 200
+        && request.resource.data.hiddenFrom is list
+        && request.resource.data.hiddenFrom.size() <= 200
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+
+    match /storyDiscovery/{storyId} {
+      allow read: if isVerifiedUser()
+        && (
+          resource.data.authorUid == request.auth.uid
+          || request.auth.uid in resource.data.allowedViewers
+        );
+      allow create: if isVerifiedUser()
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['authorUid', 'expiresAt', 'allowedViewers', 'tier', 'type'])
+        && request.resource.data.allowedViewers is list
+        && request.resource.data.allowedViewers.size() <= 500
+        && !(request.auth.uid in request.resource.data.allowedViewers)
+        && request.resource.data.expiresAt >= request.time + duration.value(24, 'h') - duration.value(5, 'm')
+        && request.resource.data.expiresAt <= request.time + duration.value(24, 'h') + duration.value(5, 'm');
+      allow update: if isVerifiedUser()
+        && resource.data.authorUid == request.auth.uid
+        && request.time < resource.data.expiresAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['allowedViewers'])
+        && request.resource.data.allowedViewers is list
+        && request.resource.data.allowedViewers.size() <= 500
+        && !(request.auth.uid in request.resource.data.allowedViewers);
+      allow delete: if isVerifiedUser() && resource.data.authorUid == request.auth.uid;
+    }
+
+    match /stories/{storyId} {
+      function hasFriendship(userA, userB) {
+        let sorted = userA < userB ? userA + '_' + userB : userB + '_' + userA;
+        return exists(/databases/$(database)/documents/friendships/$(sorted));
+      }
+      function getPrivacy(uid) {
+        let doc = get(/databases/$(database)/documents/privacyLists/$(uid));
+        return doc != null ? doc.data : {'closeFriends': [], 'hiddenFrom': []};
+      }
+
+      allow list: if isVerifiedUser()
+        && resource.data.authorUid == request.auth.uid;
+
+      allow get: if isVerifiedUser()
+        && (
+          (resource.data.authorUid == request.auth.uid && request.time < resource.data.expiresAt)
+          || (
+            request.time < resource.data.expiresAt
+            && hasFriendship(request.auth.uid, resource.data.authorUid)
+            && noBlockExists(request.auth.uid, resource.data.authorUid)
+            && !(request.auth.uid in getPrivacy(resource.data.authorUid).hiddenFrom)
+            && (
+              resource.data.tier == 'friends'
+              || (resource.data.tier == 'closeFriends' && request.auth.uid in getPrivacy(resource.data.authorUid).closeFriends)
+              || (resource.data.tier == 'selected' && request.auth.uid in resource.data.selectedIds)
+            )
+          )
+        );
+
+      allow create: if isVerifiedUser()
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['authorUid', 'type', 'tier', 'selectedIds', 'mediaUrl', 'text', 'backgroundColor', 'createdAt', 'expiresAt'])
+        && request.resource.data.tier in ['friends', 'closeFriends', 'selected']
+        && (request.resource.data.tier != 'selected' ? request.resource.data.selectedIds == null : (request.resource.data.selectedIds is list && request.resource.data.selectedIds.size() <= 50))
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.expiresAt >= request.time + duration.value(24, 'h') - duration.value(5, 'm')
+        && request.resource.data.expiresAt <= request.time + duration.value(24, 'h') + duration.value(5, 'm')
+        && (
+          (request.resource.data.type == 'image'
+            && request.resource.data.mediaUrl is string && request.resource.data.mediaUrl.matches('^https://res\\.cloudinary\\.com/cmpoe94k/image/upload/.*$')
+            && request.resource.data.text == null && request.resource.data.backgroundColor == null)
+          ||
+          (request.resource.data.type == 'video'
+            && request.resource.data.mediaUrl is string && request.resource.data.mediaUrl.matches('^https://res\\.cloudinary\\.com/cmpoe94k/video/upload/.*$')
+            && request.resource.data.text == null && request.resource.data.backgroundColor == null)
+          ||
+          (request.resource.data.type == 'text'
+            && request.resource.data.mediaUrl == null
+            && request.resource.data.text is string && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 1000
+            && request.resource.data.backgroundColor in ['classic', 'modern', 'neon', 'mono'])
+        );
+
+      allow update: if false;
+
+      allow delete: if isVerifiedUser() && resource.data.authorUid == request.auth.uid;
+
+      match /viewers/{viewerUid} {
+        // Author can read (get + list) all viewer receipts for their own story.
+        allow read: if isVerifiedUser()
+          && get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid == request.auth.uid;
+
+        // A viewer can GET only their own receipt, and only while they are currently
+        // authorized to access the parent story (active, friended, not blocked, not hidden, correct tier).
+        allow get: if isVerifiedUser()
+          && viewerUid == request.auth.uid
+          && request.time < get(/databases/$(database)/documents/stories/$(storyId)).data.expiresAt
+          && hasFriendship(request.auth.uid, get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid)
+          && noBlockExists(request.auth.uid, get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid)
+          && !(request.auth.uid in getPrivacy(get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid).hiddenFrom)
+          && (
+            get(/databases/$(database)/documents/stories/$(storyId)).data.tier == 'friends'
+            || (get(/databases/$(database)/documents/stories/$(storyId)).data.tier == 'closeFriends' && request.auth.uid in getPrivacy(get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid).closeFriends)
+            || (get(/databases/$(database)/documents/stories/$(storyId)).data.tier == 'selected' && request.auth.uid in get(/databases/$(database)/documents/stories/$(storyId)).data.selectedIds)
+          );
+
+        allow create: if isVerifiedUser()
+          && viewerUid == request.auth.uid
+          && request.resource.data.keys().hasOnly(['viewerUid', 'viewedAt'])
+          && request.resource.data.viewerUid == request.auth.uid
+          && request.resource.data.viewedAt == request.time
+          && get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid != request.auth.uid
+          && request.time < get(/databases/$(database)/documents/stories/$(storyId)).data.expiresAt
+          && hasFriendship(request.auth.uid, get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid)
+          && noBlockExists(request.auth.uid, get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid)
+          && !(request.auth.uid in getPrivacy(get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid).hiddenFrom)
+          && (
+            get(/databases/$(database)/documents/stories/$(storyId)).data.tier == 'friends'
+            || (get(/databases/$(database)/documents/stories/$(storyId)).data.tier == 'closeFriends' && request.auth.uid in getPrivacy(get(/databases/$(database)/documents/stories/$(storyId)).data.authorUid).closeFriends)
+            || (get(/databases/$(database)/documents/stories/$(storyId)).data.tier == 'selected' && request.auth.uid in get(/databases/$(database)/documents/stories/$(storyId)).data.selectedIds)
+          );
+
+        allow update, delete: if false;
+      }
+    }
+
     match /users/{userId} {
-      allow read: if request.auth != null;
+      allow read: if isVerifiedUser();
       allow create: if request.auth != null
         && request.auth.uid == userId
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.keys().hasOnly([
-          'uid', 'displayName', 'username', 'usernameLower', 'bio', 'createdAt'
+          'uid', 'displayName', 'username', 'usernameLower', 'bio', 'createdAt', 'photoUrl'
         ])
         && request.resource.data.displayName is string
         && request.resource.data.displayName.size() > 0
@@ -23,8 +164,11 @@ service cloud.firestore {
         && request.resource.data.bio.size() <= 150
         && request.resource.data.usernameLower.matches('^[a-z0-9_.]{3,30}$')
         && request.resource.data.usernameLower == request.resource.data.username.lower()
+        && (!request.resource.data.keys().hasAny(['photoUrl'])
+          || (request.resource.data.photoUrl is string
+            && request.resource.data.photoUrl.matches('^https://res[.]cloudinary[.]com/cmpoe94k/image/upload/[A-Za-z0-9_-][A-Za-z0-9_.-]*(/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$')))
         && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.usernameLower)).data.uid == request.auth.uid;
-      allow update: if request.auth != null
+      allow update: if isVerifiedUser()
         && request.auth.uid == userId
         && request.resource.data.uid == resource.data.uid
         && request.resource.data.displayName is string
@@ -37,12 +181,80 @@ service cloud.firestore {
         && request.resource.data.bio.size() <= 150
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.keys().hasOnly([
-          'uid', 'displayName', 'username', 'usernameLower', 'bio', 'createdAt'
+          'uid', 'displayName', 'username', 'usernameLower', 'bio', 'createdAt', 'photoUrl'
         ])
+        && (!request.resource.data.keys().hasAny(['photoUrl'])
+          || (request.resource.data.photoUrl is string
+            && request.resource.data.photoUrl.matches('^https://res[.]cloudinary[.]com/cmpoe94k/image/upload/[A-Za-z0-9_-][A-Za-z0-9_.-]*(/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$')))
         && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.usernameLower)).data.uid == request.auth.uid
         && (request.resource.data.usernameLower == resource.data.usernameLower
           || !existsAfter(/databases/$(database)/documents/usernames/$(resource.data.usernameLower)));
       allow delete: if false;
+
+      match /chatPreferences/{chatKey} {
+        allow read: if isVerifiedUser() && request.auth.uid == userId;
+        allow create: if isVerifiedUser()
+          && request.auth.uid == userId
+          && request.resource.data.keys().hasOnly(['chatId', 'chatType', 'ownerUid', 'pinned', 'pinnedAt', 'archived', 'archivedAt', 'muted', 'mutedAt', 'mutedStories', 'mutedStoriesAt', 'createdAt', 'updatedAt'])
+          && request.resource.data.keys().hasAll(['chatId', 'chatType', 'ownerUid', 'pinned', 'archived', 'muted', 'updatedAt'])
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.chatId == chatKey
+          && request.resource.data.chatId is string
+          && request.resource.data.chatId.size() > 0
+          && request.resource.data.chatId.size() <= 128
+          && request.resource.data.chatType in ['direct', 'group']
+          && request.resource.data.pinned is bool
+          && request.resource.data.archived is bool
+          && request.resource.data.muted is bool
+          && (!request.resource.data.keys().hasAny(['pinnedAt']) || request.resource.data.pinnedAt == null || request.resource.data.pinnedAt is timestamp)
+          && (!request.resource.data.keys().hasAny(['archivedAt']) || request.resource.data.archivedAt == null || request.resource.data.archivedAt is timestamp)
+          && (!request.resource.data.keys().hasAny(['mutedAt']) || request.resource.data.mutedAt == null || request.resource.data.mutedAt is timestamp)
+          && (!request.resource.data.keys().hasAny(['createdAt']) || request.resource.data.createdAt is timestamp)
+          && request.resource.data.updatedAt is timestamp;
+        allow update: if isVerifiedUser()
+          && request.auth.uid == userId
+          && request.resource.data.keys().hasOnly(['chatId', 'chatType', 'ownerUid', 'pinned', 'pinnedAt', 'archived', 'archivedAt', 'muted', 'mutedAt', 'mutedStories', 'mutedStoriesAt', 'createdAt', 'updatedAt'])
+          && request.resource.data.keys().hasAll(['chatId', 'chatType', 'ownerUid', 'pinned', 'archived', 'muted', 'updatedAt'])
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.chatId == resource.data.chatId
+          && request.resource.data.chatType == resource.data.chatType
+          && request.resource.data.pinned is bool
+          && request.resource.data.archived is bool
+          && request.resource.data.muted is bool
+          && (!request.resource.data.keys().hasAny(['pinnedAt']) || request.resource.data.pinnedAt == null || request.resource.data.pinnedAt is timestamp)
+          && (!request.resource.data.keys().hasAny(['archivedAt']) || request.resource.data.archivedAt == null || request.resource.data.archivedAt is timestamp)
+          && (!request.resource.data.keys().hasAny(['mutedAt']) || request.resource.data.mutedAt == null || request.resource.data.mutedAt is timestamp)
+          && (!resource.data.keys().hasAny(['createdAt']) || request.resource.data.createdAt == resource.data.createdAt)
+          && request.resource.data.updatedAt is timestamp;
+        allow delete: if isVerifiedUser() && request.auth.uid == userId;
+      }
+      match /pushTokens/{deviceId} {
+       allow read, delete: if isVerifiedUser()
+         && request.auth.uid == userId
+         && deviceId.matches('^[A-Za-z0-9_-]{1,160}$');
+
+       allow create, update: if isVerifiedUser()
+         && request.auth.uid == userId
+         && deviceId.matches('^[A-Za-z0-9_-]{1,160}$')
+         && request.resource.data.keys().hasOnly([
+           'token', 'platform', 'updatedAt', 'preferences'
+         ])
+         && request.resource.data.keys().hasAll([
+           'token', 'platform', 'updatedAt'
+         ])
+         && request.resource.data.token is string
+         && request.resource.data.token.size() > 0
+         && request.resource.data.token.size() <= 4096
+         && (request.resource.data.platform == 'android'
+           || request.resource.data.platform == 'ios')
+         && (!request.resource.data.keys().hasAny(['preferences'])
+           || (request.resource.data.preferences is map
+             && request.resource.data.preferences.keys().hasOnly(['messages', 'calls', 'social'])
+             && (!request.resource.data.preferences.keys().hasAny(['messages']) || request.resource.data.preferences.messages is bool)
+             && (!request.resource.data.preferences.keys().hasAny(['calls']) || request.resource.data.preferences.calls is bool)
+             && (!request.resource.data.preferences.keys().hasAny(['social']) || request.resource.data.preferences.social is bool)))
+         && request.resource.data.updatedAt == request.time;
+      }
     }
 
     match /usernames/{usernameLower} {
@@ -53,31 +265,31 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly(['uid'])
         && request.resource.data.uid == request.auth.uid;
       allow update: if false;
-      allow delete: if request.auth != null
+      allow delete: if isVerifiedUser()
         && resource.data.uid == request.auth.uid;
     }
 
     match /userBlocks/{blockId} {
-      allow get: if request.auth != null
+      allow get: if isVerifiedUser()
         && (resource == null
           ? blockId.matches('^' + request.auth.uid + '_.*$')
           : resource.data.blockerUid == request.auth.uid);
-      allow list: if request.auth != null
+      allow list: if isVerifiedUser()
         && resource.data.blockerUid == request.auth.uid;
-      allow create: if request.auth != null
+      allow create: if isVerifiedUser()
         && request.resource.data.keys().hasOnly(['blockerUid', 'blockedUid', 'createdAt'])
         && blockId == request.resource.data.blockerUid + '_' + request.resource.data.blockedUid
         && request.resource.data.blockerUid == request.auth.uid
         && request.resource.data.blockedUid != request.auth.uid
         && request.resource.data.createdAt is timestamp;
       allow update: if false;
-      allow delete: if request.auth != null
+      allow delete: if isVerifiedUser()
         && resource.data.blockerUid == request.auth.uid;
     }
 
     match /userReports/{reportId} {
       allow read: if false;
-      allow create: if request.auth != null
+      allow create: if isVerifiedUser()
         && request.resource.data.keys().hasAll(['reporterUid', 'reportedUid', 'reason', 'createdAt'])
         && request.resource.data.keys().hasOnly(['reporterUid', 'reportedUid', 'reason', 'details', 'createdAt'])
         && reportId == request.resource.data.reporterUid + '_' + request.resource.data.reportedUid
@@ -132,9 +344,9 @@ service cloud.firestore {
           && !existsAfter(/databases/$(database)/documents/userFriends/$(friendRequest.recipientId + '_' + friendRequest.senderId));
       }
 
-      allow read: if request.auth != null
+      allow read: if isVerifiedUser()
         && (resource == null || resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
-      allow create: if request.auth != null
+      allow create: if isVerifiedUser()
         && request.resource.data.keys().hasOnly(['senderId', 'recipientId', 'status', 'createdAt'])
         && requestId == request.resource.data.senderId + '_' + request.resource.data.recipientId
         && request.resource.data.senderId == request.auth.uid
@@ -142,7 +354,7 @@ service cloud.firestore {
         && request.resource.data.status == 'pending'
         && request.resource.data.createdAt is timestamp
         && canStartFriendRequest(request.resource.data.senderId, request.resource.data.recipientId);
-      allow update: if request.auth != null
+      allow update: if isVerifiedUser()
         && request.resource.data.keys().hasOnly([
           'senderId', 'recipientId', 'status', 'createdAt', 'acceptedAt', 'declinedAt'
         ])
@@ -188,9 +400,9 @@ service cloud.firestore {
               && friendRequest.recipientId == friendship.userA));
       }
 
-      allow read: if request.auth != null
+      allow read: if isVerifiedUser()
         && (resource == null || resource.data.userA == request.auth.uid || resource.data.userB == request.auth.uid);
-      allow create: if request.auth != null
+      allow create: if isVerifiedUser()
         && request.resource.data.keys().hasOnly(['userA', 'userB', 'requestId', 'createdAt'])
         && ((request.resource.data.userA < request.resource.data.userB
           && friendshipId == request.resource.data.userA + '_' + request.resource.data.userB)
@@ -202,7 +414,7 @@ service cloud.firestore {
         && noBlockExists(request.resource.data.userA, request.resource.data.userB)
         && matchesAcceptedFriendRequest(request.resource.data);
       allow update: if false;
-      allow delete: if request.auth != null
+      allow delete: if isVerifiedUser()
         && (request.auth.uid == resource.data.userA || request.auth.uid == resource.data.userB)
         && getAfter(/databases/$(database)/documents/friendRequests/$(resource.data.requestId)).data.status == 'declined'
         && !existsAfter(/databases/$(database)/documents/userFriends/$(resource.data.userA + '_' + resource.data.userB))
@@ -210,8 +422,8 @@ service cloud.firestore {
     }
 
     match /userFriends/{friendshipId} {
-      allow read: if request.auth != null && resource.data.ownerId == request.auth.uid;
-      allow create: if request.auth != null
+      allow read: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
         && request.resource.data.keys().hasOnly(['ownerId', 'friendId', 'requestId', 'createdAt'])
         && friendshipId == request.resource.data.ownerId + '_' + request.resource.data.friendId
         && request.resource.data.ownerId != request.resource.data.friendId
@@ -224,7 +436,7 @@ service cloud.firestore {
           || (getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.senderId == request.resource.data.friendId
           && getAfter(/databases/$(database)/documents/friendRequests/$(request.resource.data.requestId)).data.recipientId == request.resource.data.ownerId));
       allow update: if false;
-      allow delete: if request.auth != null
+      allow delete: if isVerifiedUser()
         && (request.auth.uid == resource.data.ownerId || request.auth.uid == resource.data.friendId)
         && getAfter(/databases/$(database)/documents/friendRequests/$(resource.data.requestId)).data.status == 'declined'
         && ((resource.data.ownerId < resource.data.friendId
@@ -234,30 +446,55 @@ service cloud.firestore {
         && !existsAfter(/databases/$(database)/documents/userFriends/$(resource.data.friendId + '_' + resource.data.ownerId));
     }
 
+    match /userPresence/{userId} {
+      allow read: if isVerifiedUser();
+      allow create, update: if isVerifiedUser()
+        && request.auth.uid == userId
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['uid', 'state', 'lastSeen', 'updatedAt'])
+        && request.resource.data.keys().hasAll(['uid', 'state', 'updatedAt'])
+        && request.resource.data.state in ['online', 'offline']
+        && (!request.resource.data.keys().hasAny(['lastSeen'])
+          || request.resource.data.lastSeen == null
+          || request.resource.data.lastSeen is timestamp)
+        && request.resource.data.updatedAt is timestamp;
+      allow delete: if false;
+    }
+
     match /conversations/{conversationId} {
-      allow read: if request.auth != null
+      allow read: if isVerifiedUser()
         && (resource == null || resource.data.participantA == request.auth.uid || resource.data.participantB == request.auth.uid);
-      allow create: if request.auth != null
+      allow create: if isVerifiedUser()
         && request.resource.data.keys().hasOnly([
           'participantA', 'participantB', 'createdAt', 'lastMessage', 'lastMessageAt', 'lastMessageSenderId'
         ])
-        && request.resource.data.participantA != request.resource.data.participantB
-        && ((request.resource.data.participantA < request.resource.data.participantB
-          && conversationId == request.resource.data.participantA + '_' + request.resource.data.participantB)
-          || (request.resource.data.participantB < request.resource.data.participantA
-          && conversationId == request.resource.data.participantB + '_' + request.resource.data.participantA))
-        && (request.auth.uid == request.resource.data.participantA || request.auth.uid == request.resource.data.participantB)
         && request.resource.data.createdAt is timestamp
         && request.resource.data.lastMessage == null
         && request.resource.data.lastMessageAt == null
         && request.resource.data.lastMessageSenderId == null
-        && noBlockExists(request.resource.data.participantA, request.resource.data.participantB)
-        && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA != null
-        && ((get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA == request.resource.data.participantA
-          && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userB == request.resource.data.participantB)
-          || (get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA == request.resource.data.participantB
-          && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userB == request.resource.data.participantA));
-      allow update: if request.auth != null
+        && (
+          (
+            request.resource.data.participantA != request.resource.data.participantB
+            && ((request.resource.data.participantA < request.resource.data.participantB
+              && conversationId == request.resource.data.participantA + '_' + request.resource.data.participantB)
+              || (request.resource.data.participantB < request.resource.data.participantA
+              && conversationId == request.resource.data.participantB + '_' + request.resource.data.participantA))
+            && (request.auth.uid == request.resource.data.participantA || request.auth.uid == request.resource.data.participantB)
+            && noBlockExists(request.resource.data.participantA, request.resource.data.participantB)
+            && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA != null
+            && ((get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA == request.resource.data.participantA
+              && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userB == request.resource.data.participantB)
+              || (get(/databases/$(database)/documents/friendships/$(conversationId)).data.userA == request.resource.data.participantB
+              && get(/databases/$(database)/documents/friendships/$(conversationId)).data.userB == request.resource.data.participantA))
+          )
+          ||
+          (
+            request.resource.data.participantA == request.auth.uid
+            && request.resource.data.participantB == request.auth.uid
+            && conversationId == request.auth.uid + '_' + request.auth.uid
+          )
+        );
+      allow update: if isVerifiedUser()
         && (resource.data.participantA == request.auth.uid || resource.data.participantB == request.auth.uid)
         && request.resource.data.keys().hasOnly([
           'participantA', 'participantB', 'createdAt', 'lastMessage', 'lastMessageAt', 'lastMessageSenderId'
@@ -267,15 +504,74 @@ service cloud.firestore {
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.lastMessage is string
         && request.resource.data.lastMessage.size() > 0
-        && request.resource.data.lastMessageAt is timestamp
-        && request.resource.data.lastMessageSenderId == request.auth.uid
-        && noBlockExists(resource.data.participantA, resource.data.participantB)
-        && exists(/databases/$(database)/documents/friendships/$(conversationId));
+        && request.resource.data.lastMessage.size() <= 5000
+        && (
+          (request.resource.data.lastMessageSenderId == request.auth.uid
+            && request.resource.data.lastMessageAt is timestamp
+            && request.resource.data.lastMessageAt == request.time)
+          || (resource.data.lastMessageSenderId == request.auth.uid
+            && request.resource.data.lastMessageSenderId == resource.data.lastMessageSenderId
+            && request.resource.data.lastMessageAt == resource.data.lastMessageAt
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage']))
+        )
+        && (
+          (
+            resource.data.participantA != resource.data.participantB
+            && noBlockExists(resource.data.participantA, resource.data.participantB)
+            && exists(/databases/$(database)/documents/friendships/$(conversationId))
+          )
+          ||
+          (
+            resource.data.participantA == request.auth.uid
+            && resource.data.participantB == request.auth.uid
+            && conversationId == request.auth.uid + '_' + request.auth.uid
+          )
+        );
       allow delete: if false;
 
+      match /typing/{userId} {
+        allow read: if isVerifiedUser()
+          && (conversationId.matches('^' + request.auth.uid + '_.*$')
+            || conversationId.matches('^.*_' + request.auth.uid + '$'));
+        allow create, update: if isVerifiedUser()
+          && request.auth.uid == userId
+          && (conversationId.matches('^' + request.auth.uid + '_.*$')
+            || conversationId.matches('^.*_' + request.auth.uid + '$'))
+          && request.resource.data.keys().hasOnly(['uid', 'isTyping', 'updatedAt'])
+          && request.resource.data.keys().hasAll(['uid', 'isTyping', 'updatedAt'])
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.isTyping is bool
+          && request.resource.data.updatedAt is timestamp;
+        allow delete: if isVerifiedUser()
+          && request.auth.uid == userId;
+      }
+
       match /messages/{messageId} {
+        function validReplyTarget(target, msgData) {
+          return !target.keys().hasAny(['callId', 'deletedAt'])
+            && msgData.replyToSenderId == target.senderId
+            && (
+              (target.keys().hasAny(['viewOnce']) && target.viewOnce == true
+                && msgData.replyToType == 'viewOnce'
+                && msgData.replyToText == 'View Once media')
+              || ((!target.keys().hasAny(['viewOnce']) || target.viewOnce != true)
+                && (
+                  (target.keys().hasAny(['imageUrl']) && msgData.replyToType == 'image')
+                  || (target.keys().hasAny(['videoUrl']) && msgData.replyToType == 'video')
+                  || (target.keys().hasAny(['fileUrl']) && msgData.replyToType == 'file')
+                  || (target.keys().hasAny(['audioUrl']) && msgData.replyToType == 'audio' && msgData.replyToText == 'Voice message')
+                  || (!target.keys().hasAny(['imageUrl', 'videoUrl', 'fileUrl', 'audioUrl']) && msgData.replyToType == 'text')
+                ))
+            );
+        }
+
+        function validReply(msgData) {
+          return exists(/databases/$(database)/documents/conversations/$(conversationId)/messages/$(msgData.replyToMessageId))
+            && validReplyTarget(get(/databases/$(database)/documents/conversations/$(conversationId)/messages/$(msgData.replyToMessageId)).data, msgData);
+        }
+
         function validCallHistory(messageId) {
-          return request.auth != null
+          return isVerifiedUser()
             && request.resource.data.keys().hasAll([
               'callId', 'callerId', 'calleeId', 'callOutcome',
               'callEndedAt', 'createdAt'
@@ -321,37 +617,69 @@ service cloud.firestore {
                 && request.resource.data.callAnsweredAt == call.answeredAt));
         }
 
-        allow read: if request.auth != null
+        allow read: if isVerifiedUser()
           && (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
             || get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid);
-        allow create: if (request.auth != null
+        allow create: if (isVerifiedUser()
           && request.resource.data.keys().hasOnly([
             'senderId', 'recipientId', 'text', 'imageUrl', 'videoUrl',
-            'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'viewOnce', 'viewedAt', 'createdAt'
+            'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'audioUrl', 'audioDurationMs', 'audioMimeType', 'viewOnce', 'viewedAt', 'createdAt',
+            'deliveredAt', 'seenAt',
+            'replyToMessageId', 'replyToSenderId', 'replyToText', 'replyToType',
+            'forwarded',
+            'location', 'locationType', 'liveLocationShareId'
+          ])
+          && (!request.resource.data.keys().hasAny(['locationType'])
+            || request.resource.data.locationType in ['current', 'live'])
+          && (!request.resource.data.keys().hasAny(['forwarded'])
+            || (request.resource.data.forwarded is bool && request.resource.data.forwarded == true))
+          && (!request.resource.data.keys().hasAny(['forwarded'])
+            || !request.resource.data.keys().hasAny(['viewOnce'])
+            || request.resource.data.viewOnce != true)
+          && !request.resource.data.keys().hasAny([
+            'editedAt', 'deletedAt', 'deletedBy', 'reactions'
           ])
           && request.resource.data.senderId == request.auth.uid
           && request.resource.data.text is string
           && request.resource.data.createdAt is timestamp
+          && (!request.resource.data.keys().hasAny(['deliveredAt'])
+            || request.resource.data.deliveredAt == null
+            || request.resource.data.deliveredAt is timestamp)
+          && (!request.resource.data.keys().hasAny(['seenAt'])
+            || request.resource.data.seenAt == null
+            || request.resource.data.seenAt is timestamp)
+          && (!request.resource.data.keys().hasAny(['replyToMessageId', 'replyToSenderId', 'replyToText', 'replyToType'])
+            || (request.resource.data.keys().hasAll(['replyToMessageId', 'replyToSenderId', 'replyToText', 'replyToType'])
+              && request.resource.data.replyToMessageId is string
+              && request.resource.data.replyToMessageId.size() > 0
+              && request.resource.data.replyToMessageId.size() <= 100
+              && request.resource.data.replyToSenderId is string
+              && request.resource.data.replyToSenderId.size() > 0
+              && request.resource.data.replyToSenderId.size() <= 100
+              && request.resource.data.replyToText is string
+              && request.resource.data.replyToText.size() <= 500
+              && request.resource.data.replyToType in ['text', 'image', 'video', 'file', 'viewOnce', 'audio']
+              && validReply(request.resource.data)))
           && ((request.resource.data.text.size() > 0
               && !request.resource.data.keys().hasAny([
-                'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType'
+                'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'location', 'locationType', 'liveLocationShareId', 'audioUrl', 'audioDurationMs', 'audioMimeType'
               ]))
             || (request.resource.data.keys().hasAny(['imageUrl'])
               && !request.resource.data.keys().hasAny([
-                'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType'
+                'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'location', 'locationType', 'liveLocationShareId', 'audioUrl', 'audioDurationMs', 'audioMimeType'
               ])
               && request.resource.data.imageUrl is string
               && request.resource.data.imageUrl.matches('^https://.*$')
               && request.resource.data.text.size() >= 0)
             || (request.resource.data.keys().hasAny(['videoUrl'])
               && !request.resource.data.keys().hasAny([
-                'imageUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType'
+                'imageUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'location', 'locationType', 'liveLocationShareId', 'audioUrl', 'audioDurationMs', 'audioMimeType'
               ])
               && request.resource.data.videoUrl is string
               && request.resource.data.videoUrl.matches('^https://.*$')
               && request.resource.data.text.size() >= 0)
             || (request.resource.data.keys().hasAll(['fileUrl', 'fileName'])
-              && !request.resource.data.keys().hasAny(['imageUrl', 'videoUrl'])
+              && !request.resource.data.keys().hasAny(['imageUrl', 'videoUrl', 'location', 'locationType', 'liveLocationShareId', 'audioUrl', 'audioDurationMs', 'audioMimeType'])
               && request.resource.data.fileUrl is string
               && request.resource.data.fileUrl.matches('^https://.*$')
               && request.resource.data.fileName is string
@@ -362,25 +690,164 @@ service cloud.firestore {
               && (!request.resource.data.keys().hasAny(['fileMimeType'])
                 || (request.resource.data.fileMimeType is string
                   && request.resource.data.fileMimeType.size() > 0))
+              && request.resource.data.text.size() >= 0)
+            || (request.resource.data.keys().hasAll(['location', 'locationType'])
+              && request.resource.data.locationType == 'current'
+              && request.resource.data.location is map
+              && request.resource.data.location.keys().hasOnly(['latitude', 'longitude'])
+              && request.resource.data.location.latitude is number
+              && request.resource.data.location.latitude >= -90.0
+              && request.resource.data.location.latitude <= 90.0
+              && request.resource.data.location.longitude is number
+              && request.resource.data.location.longitude >= -180.0
+              && request.resource.data.location.longitude <= 180.0
+              && !request.resource.data.keys().hasAny([
+                'liveLocationShareId', 'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'viewOnce', 'viewedAt', 'audioUrl', 'audioDurationMs', 'audioMimeType'
+              ])
+              && !request.resource.data.keys().hasAny(['forwarded'])
+              && request.resource.data.senderId != request.resource.data.recipientId
+              && request.resource.data.text.size() >= 0)
+            || (request.resource.data.keys().hasAll(['liveLocationShareId', 'locationType'])
+              && request.resource.data.locationType == 'live'
+              && request.resource.data.liveLocationShareId is string
+              && request.resource.data.liveLocationShareId.size() > 0
+              && request.resource.data.liveLocationShareId.size() <= 100
+              && !request.resource.data.keys().hasAny([
+                'location', 'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'viewOnce', 'viewedAt', 'audioUrl', 'audioDurationMs', 'audioMimeType'
+              ])
+              && !request.resource.data.keys().hasAny(['forwarded'])
+              && request.resource.data.senderId != request.resource.data.recipientId
+              && getAfter(/databases/$(database)/documents/conversations/$(conversationId)/liveLocations/$(request.resource.data.liveLocationShareId)).data.ownerId == request.resource.data.senderId
+              && request.resource.data.text.size() >= 0)
+            || (request.resource.data.keys().hasAll(['audioUrl', 'audioDurationMs'])
+              && request.resource.data.audioUrl is string
+              && request.resource.data.audioUrl.matches('^https://res\\.cloudinary\\.com/cmpoe94k/video/upload/.*$')
+              && request.resource.data.audioDurationMs is number
+              && request.resource.data.audioDurationMs > 0
+              && request.resource.data.audioDurationMs <= 600000
+              && (!request.resource.data.keys().hasAny(['audioMimeType']) || request.resource.data.audioMimeType is string)
+              && !request.resource.data.keys().hasAny([
+                'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'location', 'locationType', 'liveLocationShareId', 'viewOnce', 'viewedAt'
+              ])
+              && (!request.resource.data.keys().hasAny(['forwarded']) || (request.resource.data.forwarded is bool && request.resource.data.forwarded == true))
               && request.resource.data.text.size() >= 0))
           && (!request.resource.data.keys().hasAny(['viewOnce', 'viewedAt'])
             || (request.resource.data.keys().hasAll(['viewOnce'])
               && request.resource.data.viewOnce == true
               && !request.resource.data.keys().hasAny(['viewedAt'])
               && request.resource.data.keys().hasAny(['imageUrl', 'videoUrl'])))
-          && ((get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
-            && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.resource.data.recipientId)
-            || (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid
-            && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.resource.data.recipientId))
-          && noBlockExists(request.resource.data.senderId, request.resource.data.recipientId)
-          && exists(/databases/$(database)/documents/friendships/$(conversationId)))
+          && (
+            (
+              request.resource.data.senderId != request.resource.data.recipientId
+              && ((get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
+                && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.resource.data.recipientId)
+                || (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid
+                && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.resource.data.recipientId))
+              && noBlockExists(request.resource.data.senderId, request.resource.data.recipientId)
+              && exists(/databases/$(database)/documents/friendships/$(conversationId))
+            )
+            ||
+            (
+              request.resource.data.senderId == request.auth.uid
+              && request.resource.data.recipientId == request.auth.uid
+              && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
+              && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid
+              && conversationId == request.auth.uid + '_' + request.auth.uid
+              && !request.resource.data.keys().hasAny(['viewOnce', 'viewedAt', 'location', 'locationType', 'liveLocationShareId'])
+            )
+          ))
           || validCallHistory(messageId);
-        allow update: if request.auth != null
-          && resource.data.recipientId == request.auth.uid
-          && resource.data.viewOnce == true
-          && !resource.data.keys().hasAny(['viewedAt'])
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewedAt'])
-          && request.resource.data.viewedAt is timestamp;
+        allow update: if isVerifiedUser()
+          && (
+            (resource.data.recipientId == request.auth.uid
+              && resource.data.viewOnce == true
+              && !resource.data.keys().hasAny(['viewedAt'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewedAt'])
+              && request.resource.data.viewedAt is timestamp)
+            ||
+            (resource.data.recipientId == request.auth.uid
+              && !resource.data.keys().hasAny(['callId'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deliveredAt', 'seenAt'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasAny(['deliveredAt', 'seenAt'])
+              && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['deliveredAt'])
+                || request.resource.data.deliveredAt is timestamp)
+              && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['seenAt'])
+                || request.resource.data.seenAt is timestamp))
+            ||
+            ((get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
+              || get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid)
+              && !resource.data.keys().hasAny(['callId', 'deletedAt'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
+              && request.resource.data.reactions is map
+              && ((!resource.data.keys().hasAny(['reactions']) && request.resource.data.reactions.keys().hasOnly([request.auth.uid]))
+                || (resource.data.keys().hasAny(['reactions']) && resource.data.reactions is map
+                  && request.resource.data.reactions.diff(resource.data.reactions).affectedKeys().hasOnly([request.auth.uid])))
+              && (!request.resource.data.reactions.keys().hasAny([request.auth.uid])
+                || request.resource.data.reactions[request.auth.uid] in ['❤️', '👍', '😂', '😮', '😢', '🔥']))
+            ||
+            (resource.data.senderId == request.auth.uid
+              && !resource.data.keys().hasAny(['callId', 'viewOnce', 'imageUrl', 'videoUrl', 'fileUrl', 'deletedAt', 'location', 'locationType', 'liveLocationShareId', 'audioUrl', 'audioDurationMs', 'audioMimeType'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'editedAt'])
+              && request.resource.data.text is string
+              && request.resource.data.text.size() > 0
+              && request.resource.data.text.size() <= 5000
+              && request.resource.data.editedAt is timestamp
+              && request.resource.data.editedAt == request.time)
+            ||
+            (resource.data.senderId == request.auth.uid
+              && !resource.data.keys().hasAny(['callId', 'deletedAt'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAt', 'deletedBy'])
+              && request.resource.data.deletedAt is timestamp
+              && request.resource.data.deletedAt == request.time
+              && request.resource.data.deletedBy == request.auth.uid)
+          );
+        allow delete: if false;
+      }
+
+      match /liveLocations/{shareId} {
+        function isConvParticipant() {
+          return isVerifiedUser()
+            && (get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA == request.auth.uid
+              || get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB == request.auth.uid)
+            && get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA != get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB
+            && noBlockExists(get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantA, get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantB)
+            && exists(/databases/$(database)/documents/friendships/$(conversationId));
+        }
+
+        allow read: if isConvParticipant();
+        allow create: if isConvParticipant()
+          && request.resource.data.keys().hasOnly(['ownerId', 'latitude', 'longitude', 'startedAt', 'expiresAt', 'stoppedAt', 'updatedAt', 'durationMinutes'])
+          && request.resource.data.keys().hasAll(['ownerId', 'latitude', 'longitude', 'startedAt', 'expiresAt', 'updatedAt', 'durationMinutes'])
+          && request.resource.data.ownerId == request.auth.uid
+          && request.resource.data.latitude is number && request.resource.data.latitude >= -90.0 && request.resource.data.latitude <= 90.0
+          && request.resource.data.longitude is number && request.resource.data.longitude >= -180.0 && request.resource.data.longitude <= 180.0
+          && request.resource.data.startedAt == request.time
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.stoppedAt == null
+          && request.resource.data.durationMinutes in [15, 60, 480]
+          && request.resource.data.expiresAt >= request.time + duration.value(request.resource.data.durationMinutes, 'm') - duration.value(1, 'm')
+          && request.resource.data.expiresAt <= request.time + duration.value(request.resource.data.durationMinutes, 'm') + duration.value(1, 'm');
+        allow update: if isConvParticipant()
+          && resource.data.ownerId == request.auth.uid
+          && request.resource.data.ownerId == resource.data.ownerId
+          && request.resource.data.startedAt == resource.data.startedAt
+          && request.resource.data.expiresAt == resource.data.expiresAt
+          && request.resource.data.durationMinutes == resource.data.durationMinutes
+          && (
+            (resource.data.stoppedAt == null
+              && request.time < resource.data.expiresAt
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['latitude', 'longitude', 'updatedAt'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasAll(['latitude', 'longitude', 'updatedAt'])
+              && request.resource.data.latitude is number && request.resource.data.latitude >= -90.0 && request.resource.data.latitude <= 90.0
+              && request.resource.data.longitude is number && request.resource.data.longitude >= -180.0 && request.resource.data.longitude <= 180.0
+              && request.resource.data.updatedAt == request.time)
+            ||
+            (resource.data.stoppedAt == null
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stoppedAt', 'updatedAt'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasAll(['stoppedAt', 'updatedAt'])
+              && request.resource.data.stoppedAt == request.time
+              && request.resource.data.updatedAt == request.time)
+          );
         allow delete: if false;
       }
     }
@@ -434,7 +901,7 @@ service cloud.firestore {
       }
 
       function isCallParticipant(call) {
-        return request.auth != null
+        return isVerifiedUser()
           && (request.auth.uid == call.callerId || request.auth.uid == call.calleeId)
           && matchesConversationParticipants(call);
       }
@@ -456,11 +923,11 @@ service cloud.firestore {
       // bounded query, so its predicate must be directly provable from the
       // query fields; create/update rules preserve that same relationship.
       allow get: if isCallParticipant(resource.data) && validCallFields(resource.data);
-      allow list: if request.auth != null
+      allow list: if isVerifiedUser()
         && request.auth.uid == resource.data.calleeId
         && resource.data.phase == 'ringing'
         && request.query.limit <= 20;
-      allow create: if request.auth != null
+      allow create: if isVerifiedUser()
         && validCallFields(request.resource.data)
         && matchesConversationParticipants(request.resource.data)
         && request.resource.data.callerId == request.auth.uid
@@ -520,7 +987,7 @@ service cloud.firestore {
       match /callerCandidates/{candidateId} {
         allow read: if isCallParticipant(get(/databases/$(database)/documents/calls/$(callId)).data)
           && validCallFields(get(/databases/$(database)/documents/calls/$(callId)).data);
-        allow create: if request.auth != null
+        allow create: if isVerifiedUser()
           && validCandidate(request.resource.data)
           && get(/databases/$(database)/documents/calls/$(callId)).data.callerId == request.auth.uid
           && isCallParticipant(get(/databases/$(database)/documents/calls/$(callId)).data)
@@ -532,7 +999,7 @@ service cloud.firestore {
       match /calleeCandidates/{candidateId} {
         allow read: if isCallParticipant(get(/databases/$(database)/documents/calls/$(callId)).data)
           && validCallFields(get(/databases/$(database)/documents/calls/$(callId)).data);
-        allow create: if request.auth != null
+        allow create: if isVerifiedUser()
           && validCandidate(request.resource.data)
           && get(/databases/$(database)/documents/calls/$(callId)).data.calleeId == request.auth.uid
           && isCallParticipant(get(/databases/$(database)/documents/calls/$(callId)).data)
@@ -542,19 +1009,176 @@ service cloud.firestore {
       }
     }
 
+    match /videoCalls/{callId} {
+      function validVideoCallFields(call) {
+        return call.keys().hasAll([
+            'conversationId', 'callerId', 'calleeId', 'kind', 'phase',
+            'offerType', 'offerSdp', 'createdAt'
+          ])
+          && call.keys().hasOnly([
+            'conversationId', 'callerId', 'calleeId', 'kind', 'phase',
+            'offerType', 'offerSdp', 'createdAt', 'answerType', 'answerSdp',
+            'answeredAt', 'endedAt', 'endedBy'
+          ])
+          && call.conversationId is string
+          && call.callerId is string
+          && call.calleeId is string
+          && call.callerId != call.calleeId
+          && call.kind == 'video'
+          && (call.phase == 'ringing' || call.phase == 'accepted'
+            || call.phase == 'cancelled' || call.phase == 'declined' || call.phase == 'failed'
+            || call.phase == 'ended')
+          && call.offerType == 'offer'
+          && call.offerSdp is string
+          && call.offerSdp.size() > 0
+          && call.offerSdp.size() <= 50000
+          && call.createdAt is timestamp
+          && (!call.keys().hasAny(['answerType', 'answerSdp', 'answeredAt'])
+            || (call.keys().hasAll(['answerType', 'answerSdp', 'answeredAt'])
+              && call.answerType == 'answer'
+              && call.answerSdp is string
+              && call.answerSdp.size() > 0
+              && call.answerSdp.size() <= 50000
+              && call.answeredAt is timestamp))
+          && (!call.keys().hasAny(['endedAt', 'endedBy'])
+            || (call.keys().hasAll(['endedAt', 'endedBy'])
+              && call.endedAt is timestamp
+              && call.endedBy is string));
+      }
+
+      function matchesConversationParticipants(call) {
+        return call.conversationId is string
+          && call.callerId is string
+          && call.calleeId is string
+          && exists(/databases/$(database)/documents/conversations/$(call.conversationId))
+          && ((get(/databases/$(database)/documents/conversations/$(call.conversationId)).data.participantA == call.callerId
+            && get(/databases/$(database)/documents/conversations/$(call.conversationId)).data.participantB == call.calleeId)
+            || (get(/databases/$(database)/documents/conversations/$(call.conversationId)).data.participantB == call.callerId
+              && get(/databases/$(database)/documents/conversations/$(call.conversationId)).data.participantA == call.calleeId));
+      }
+
+      function isCallParticipant(call) {
+        return isVerifiedUser()
+          && (request.auth.uid == call.callerId || request.auth.uid == call.calleeId)
+          && matchesConversationParticipants(call);
+      }
+
+      function validCandidate(candidate) {
+        return candidate.keys().hasOnly(['candidate', 'sdpMid', 'sdpMLineIndex', 'createdAt'])
+          && candidate.keys().hasAll(['candidate', 'sdpMid', 'sdpMLineIndex', 'createdAt'])
+          && candidate.candidate is string
+          && candidate.candidate.size() > 0
+          && candidate.candidate.size() <= 2000
+          && (candidate.sdpMid == null || (candidate.sdpMid is string && candidate.sdpMid.size() <= 256))
+          && (candidate.sdpMLineIndex == null || candidate.sdpMLineIndex is int)
+          && candidate.createdAt is timestamp
+          && candidate.createdAt == request.time;
+      }
+
+      // A video call document can be fetched only after validating its immutable
+      // participant/conversation relationship. Incoming-call discovery is a
+      // bounded query, so its predicate must be directly provable from the
+      // query fields; create/update rules preserve that same relationship.
+      allow get: if isCallParticipant(resource.data) && validVideoCallFields(resource.data);
+      allow list: if isVerifiedUser()
+        && request.auth.uid == resource.data.calleeId
+        && resource.data.phase == 'ringing'
+        && request.query.limit <= 20;
+      allow create: if isVerifiedUser()
+        && validVideoCallFields(request.resource.data)
+        && matchesConversationParticipants(request.resource.data)
+        && request.resource.data.callerId == request.auth.uid
+        && request.resource.data.phase == 'ringing'
+        && noBlockExists(request.resource.data.callerId, request.resource.data.calleeId)
+        && request.resource.data.keys().hasOnly([
+          'conversationId', 'callerId', 'calleeId', 'kind', 'phase',
+          'offerType', 'offerSdp', 'createdAt'
+        ])
+        && request.resource.data.createdAt == request.time;
+      allow update: if isCallParticipant(resource.data)
+        && validVideoCallFields(resource.data)
+        && validVideoCallFields(request.resource.data)
+        && matchesConversationParticipants(request.resource.data)
+        && request.resource.data.conversationId == resource.data.conversationId
+        && request.resource.data.callerId == resource.data.callerId
+        && request.resource.data.calleeId == resource.data.calleeId
+        && request.resource.data.kind == resource.data.kind
+        && request.resource.data.offerType == resource.data.offerType
+        && request.resource.data.offerSdp == resource.data.offerSdp
+        && request.resource.data.createdAt == resource.data.createdAt
+        && ((request.auth.uid == resource.data.callerId
+          && resource.data.phase == 'ringing'
+          && request.resource.data.phase == 'cancelled'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phase', 'endedAt', 'endedBy'])
+          && request.resource.data.endedAt == request.time
+          && request.resource.data.endedBy == request.auth.uid)
+          || (request.auth.uid == resource.data.calleeId
+            && resource.data.phase == 'ringing'
+            && !resource.data.keys().hasAny(['answerType', 'answerSdp', 'answeredAt'])
+            && request.resource.data.phase == 'accepted'
+            && noBlockExists(resource.data.callerId, resource.data.calleeId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'phase', 'answerType', 'answerSdp', 'answeredAt'
+            ])
+            && request.resource.data.answeredAt == request.time)
+          || (request.auth.uid == resource.data.calleeId
+            && resource.data.phase == 'ringing'
+            && request.resource.data.phase == 'declined'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phase', 'endedAt', 'endedBy'])
+            && request.resource.data.endedAt == request.time
+            && request.resource.data.endedBy == request.auth.uid)
+          || ((request.auth.uid == resource.data.callerId || request.auth.uid == resource.data.calleeId)
+            && (resource.data.phase == 'ringing' || resource.data.phase == 'accepted')
+            && request.resource.data.phase == 'failed'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phase', 'endedAt', 'endedBy'])
+            && request.resource.data.endedAt == request.time
+            && request.resource.data.endedBy == request.auth.uid)
+          || ((request.auth.uid == resource.data.callerId || request.auth.uid == resource.data.calleeId)
+            && resource.data.phase == 'accepted'
+            && request.resource.data.phase == 'ended'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['phase', 'endedAt', 'endedBy'])
+            && request.resource.data.endedAt == request.time
+            && request.resource.data.endedBy == request.auth.uid));
+      allow delete: if false;
+
+      match /callerCandidates/{candidateId} {
+        allow read: if isCallParticipant(get(/databases/$(database)/documents/videoCalls/$(callId)).data)
+          && validVideoCallFields(get(/databases/$(database)/documents/videoCalls/$(callId)).data);
+        allow create: if isVerifiedUser()
+          && validCandidate(request.resource.data)
+          && get(/databases/$(database)/documents/videoCalls/$(callId)).data.callerId == request.auth.uid
+          && isCallParticipant(get(/databases/$(database)/documents/videoCalls/$(callId)).data)
+          && (get(/databases/$(database)/documents/videoCalls/$(callId)).data.phase == 'ringing'
+            || get(/databases/$(database)/documents/videoCalls/$(callId)).data.phase == 'accepted');
+        allow update, delete: if false;
+      }
+
+      match /calleeCandidates/{candidateId} {
+        allow read: if isCallParticipant(get(/databases/$(database)/documents/videoCalls/$(callId)).data)
+          && validVideoCallFields(get(/databases/$(database)/documents/videoCalls/$(callId)).data);
+        allow create: if isVerifiedUser()
+          && validCandidate(request.resource.data)
+          && get(/databases/$(database)/documents/videoCalls/$(callId)).data.calleeId == request.auth.uid
+          && isCallParticipant(get(/databases/$(database)/documents/videoCalls/$(callId)).data)
+          && (get(/databases/$(database)/documents/videoCalls/$(callId)).data.phase == 'ringing'
+            || get(/databases/$(database)/documents/videoCalls/$(callId)).data.phase == 'accepted');
+        allow update, delete: if false;
+      }
+    }
+
     match /posts/{postId} {
       function canInteractWithPost() {
         let post = get(/databases/$(database)/documents/posts/$(postId)).data;
-        return request.auth != null
+        return isVerifiedUser()
           && exists(/databases/$(database)/documents/posts/$(postId))
           && (post.authorUid == request.auth.uid
             || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + post.authorUid)));
       }
 
-      allow read: if request.auth != null
+      allow read: if isVerifiedUser()
         && (resource.data.authorUid == request.auth.uid
           || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + resource.data.authorUid)));
-      allow create: if request.auth != null
+      allow create: if isVerifiedUser()
         && request.resource.data.keys().hasOnly(['authorUid', 'text', 'imageUrl', 'createdAt'])
         && request.resource.data.authorUid == request.auth.uid
         && request.resource.data.text is string
@@ -566,11 +1190,11 @@ service cloud.firestore {
           || request.resource.data.keys().hasAny(['imageUrl']))
         && request.resource.data.createdAt is timestamp;
       allow update: if false;
-      allow delete: if request.auth != null
+      allow delete: if isVerifiedUser()
         && resource.data.authorUid == request.auth.uid;
 
       match /likes/{userId} {
-        allow read: if request.auth != null
+        allow read: if isVerifiedUser()
           && (get(/databases/$(database)/documents/posts/$(postId)).data.authorUid == request.auth.uid
             || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + get(/databases/$(database)/documents/posts/$(postId)).data.authorUid)));
         allow create: if canInteractWithPost()
@@ -583,7 +1207,7 @@ service cloud.firestore {
       }
 
       match /comments/{commentId} {
-        allow read: if request.auth != null
+        allow read: if isVerifiedUser()
           && (get(/databases/$(database)/documents/posts/$(postId)).data.authorUid == request.auth.uid
             || exists(/databases/$(database)/documents/userFriends/$(request.auth.uid + '_' + get(/databases/$(database)/documents/posts/$(postId)).data.authorUid)));
         allow create: if canInteractWithPost()
@@ -606,8 +1230,8 @@ service cloud.firestore {
     }
 
     match /groups/{groupId} {
-      allow read: if request.auth != null && request.auth.uid in resource.data.memberIds;
-      allow create: if request.auth != null
+      allow read: if isVerifiedUser() && request.auth.uid in resource.data.memberIds;
+      allow create: if isVerifiedUser()
         && request.resource.data.keys().hasOnly([
           'name', 'createdBy', 'createdAt', 'updatedAt', 'memberIds', 'adminIds',
           'lastMessage', 'lastMessageAt', 'lastMessageSenderId'
@@ -631,7 +1255,7 @@ service cloud.firestore {
         && request.resource.data.lastMessage == null
         && request.resource.data.lastMessageAt == null
         && request.resource.data.lastMessageSenderId == null;
-      allow update: if request.auth != null
+      allow update: if isVerifiedUser()
         && request.auth.uid in resource.data.memberIds
         && request.resource.data.keys().hasOnly([
           'name', 'createdBy', 'createdAt', 'updatedAt', 'memberIds', 'adminIds',
@@ -715,35 +1339,126 @@ service cloud.firestore {
       allow delete: if false;
 
       match /messages/{messageId} {
-        allow read: if request.auth != null
+        allow read: if isVerifiedUser()
           && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberIds;
-        allow create: if request.auth != null
+        allow create: if isVerifiedUser()
           && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberIds
           && request.resource.data.keys().hasOnly([
-            'senderId', 'text', 'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'createdAt'
+            'senderId', 'text', 'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'audioUrl', 'audioDurationMs', 'audioMimeType', 'createdAt',
+            'forwarded',
+            'location', 'locationType', 'liveLocationShareId'
           ])
+          && (!request.resource.data.keys().hasAny(['locationType'])
+            || request.resource.data.locationType in ['current', 'live'])
+          && (!request.resource.data.keys().hasAny(['forwarded'])
+            || (request.resource.data.forwarded is bool && request.resource.data.forwarded == true))
           && request.resource.data.senderId == request.auth.uid
           && request.resource.data.text is string
           && request.resource.data.createdAt is timestamp
           && ((request.resource.data.text.size() > 0
-              && !request.resource.data.keys().hasAny(['imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType']))
+              && !request.resource.data.keys().hasAny([
+                'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'location', 'locationType', 'liveLocationShareId', 'audioUrl', 'audioDurationMs', 'audioMimeType'
+              ]))
             || (request.resource.data.keys().hasAny(['imageUrl'])
-              && !request.resource.data.keys().hasAny(['videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType'])
+              && !request.resource.data.keys().hasAny([
+                'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'location', 'locationType', 'liveLocationShareId', 'audioUrl', 'audioDurationMs', 'audioMimeType'
+              ])
               && request.resource.data.imageUrl is string
               && request.resource.data.imageUrl.matches('^https://.*$'))
             || (request.resource.data.keys().hasAny(['videoUrl'])
-              && !request.resource.data.keys().hasAny(['imageUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType'])
+              && !request.resource.data.keys().hasAny([
+                'imageUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'location', 'locationType', 'liveLocationShareId', 'audioUrl', 'audioDurationMs', 'audioMimeType'
+              ])
               && request.resource.data.videoUrl is string
               && request.resource.data.videoUrl.matches('^https://.*$'))
             || (request.resource.data.keys().hasAll(['fileUrl', 'fileName'])
-              && !request.resource.data.keys().hasAny(['imageUrl', 'videoUrl'])
+              && !request.resource.data.keys().hasAny(['imageUrl', 'videoUrl', 'location', 'locationType', 'liveLocationShareId', 'audioUrl', 'audioDurationMs', 'audioMimeType'])
               && request.resource.data.fileUrl is string
               && request.resource.data.fileUrl.matches('^https://.*$')
               && request.resource.data.fileName is string
               && request.resource.data.fileName.size() > 0
               && (!request.resource.data.keys().hasAny(['fileSize']) || (request.resource.data.fileSize is int && request.resource.data.fileSize >= 0))
-              && (!request.resource.data.keys().hasAny(['fileMimeType']) || (request.resource.data.fileMimeType is string && request.resource.data.fileMimeType.size() > 0))));
+              && (!request.resource.data.keys().hasAny(['fileMimeType']) || (request.resource.data.fileMimeType is string && request.resource.data.fileMimeType.size() > 0)))
+            || (request.resource.data.keys().hasAll(['location', 'locationType'])
+              && request.resource.data.locationType == 'current'
+              && request.resource.data.location is map
+              && request.resource.data.location.keys().hasOnly(['latitude', 'longitude'])
+              && request.resource.data.location.latitude is number
+              && request.resource.data.location.latitude >= -90.0
+              && request.resource.data.location.latitude <= 90.0
+              && request.resource.data.location.longitude is number
+              && request.resource.data.location.longitude >= -180.0
+              && request.resource.data.location.longitude <= 180.0
+              && !request.resource.data.keys().hasAny([
+                'liveLocationShareId', 'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'viewOnce', 'viewedAt', 'audioUrl', 'audioDurationMs', 'audioMimeType'
+              ])
+              && !request.resource.data.keys().hasAny(['forwarded']))
+            || (request.resource.data.keys().hasAll(['liveLocationShareId', 'locationType'])
+              && request.resource.data.locationType == 'live'
+              && request.resource.data.liveLocationShareId is string
+              && request.resource.data.liveLocationShareId.size() > 0
+              && request.resource.data.liveLocationShareId.size() <= 100
+              && !request.resource.data.keys().hasAny([
+                'location', 'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'viewOnce', 'viewedAt', 'audioUrl', 'audioDurationMs', 'audioMimeType'
+              ])
+              && !request.resource.data.keys().hasAny(['forwarded'])
+              && getAfter(/databases/$(database)/documents/groups/$(groupId)/liveLocations/$(request.resource.data.liveLocationShareId)).data.ownerId == request.resource.data.senderId)
+            || (request.resource.data.keys().hasAll(['audioUrl', 'audioDurationMs'])
+              && request.resource.data.audioUrl is string
+              && request.resource.data.audioUrl.matches('^https://res\\.cloudinary\\.com/cmpoe94k/video/upload/.*$')
+              && request.resource.data.audioDurationMs is number
+              && request.resource.data.audioDurationMs > 0
+              && request.resource.data.audioDurationMs <= 600000
+              && (!request.resource.data.keys().hasAny(['audioMimeType']) || request.resource.data.audioMimeType is string)
+              && !request.resource.data.keys().hasAny([
+                'imageUrl', 'videoUrl', 'fileUrl', 'fileName', 'fileSize', 'fileMimeType', 'location', 'locationType', 'liveLocationShareId'
+              ])
+              && (!request.resource.data.keys().hasAny(['forwarded']) || (request.resource.data.forwarded is bool && request.resource.data.forwarded == true))
+              && request.resource.data.text.size() >= 0));
         allow update, delete: if false;
+      }
+
+      match /liveLocations/{shareId} {
+        function isGroupMember() {
+          return isVerifiedUser()
+            && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberIds;
+        }
+
+        allow read: if isGroupMember();
+        allow create: if isGroupMember()
+          && request.resource.data.keys().hasOnly(['ownerId', 'latitude', 'longitude', 'startedAt', 'expiresAt', 'stoppedAt', 'updatedAt', 'durationMinutes'])
+          && request.resource.data.keys().hasAll(['ownerId', 'latitude', 'longitude', 'startedAt', 'expiresAt', 'updatedAt', 'durationMinutes'])
+          && request.resource.data.ownerId == request.auth.uid
+          && request.resource.data.latitude is number && request.resource.data.latitude >= -90.0 && request.resource.data.latitude <= 90.0
+          && request.resource.data.longitude is number && request.resource.data.longitude >= -180.0 && request.resource.data.longitude <= 180.0
+          && request.resource.data.startedAt == request.time
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.stoppedAt == null
+          && request.resource.data.durationMinutes in [15, 60, 480]
+          && request.resource.data.expiresAt >= request.time + duration.value(request.resource.data.durationMinutes, 'm') - duration.value(1, 'm')
+          && request.resource.data.expiresAt <= request.time + duration.value(request.resource.data.durationMinutes, 'm') + duration.value(1, 'm');
+        allow update: if isGroupMember()
+          && resource.data.ownerId == request.auth.uid
+          && request.resource.data.ownerId == resource.data.ownerId
+          && request.resource.data.startedAt == resource.data.startedAt
+          && request.resource.data.expiresAt == resource.data.expiresAt
+          && request.resource.data.durationMinutes == resource.data.durationMinutes
+          && (
+            (resource.data.stoppedAt == null
+              && request.time < resource.data.expiresAt
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['latitude', 'longitude', 'updatedAt'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasAll(['latitude', 'longitude', 'updatedAt'])
+              && request.resource.data.latitude is number && request.resource.data.latitude >= -90.0 && request.resource.data.latitude <= 90.0
+              && request.resource.data.longitude is number && request.resource.data.longitude >= -180.0 && request.resource.data.longitude <= 180.0
+              && request.resource.data.updatedAt == request.time)
+            ||
+            (resource.data.stoppedAt == null
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stoppedAt', 'updatedAt'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasAll(['stoppedAt', 'updatedAt'])
+              && request.resource.data.stoppedAt == request.time
+              && request.resource.data.updatedAt == request.time)
+          );
+        allow delete: if false;
       }
     }
   }

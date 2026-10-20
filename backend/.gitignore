@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Environment configurations
+.env
+.env.*
+!.env.example
+
+# Service account credentials
+*serviceAccount*.json
+*service-account*.json
+serviceAccountKey*.json
+
+# Logs
+*.log
+
+# Vercel deployment cache
+.vercel/

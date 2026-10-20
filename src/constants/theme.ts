@@ -7,27 +7,12 @@ import '@/global.css';
 
 import { Platform } from 'react-native';
 
+import { RocketColorsDark, RocketColorsLight } from '@/design-system/tokens/colors';
+import { Spacing as DesignSystemSpacing } from '@/design-system/tokens/spacing';
+
 export const Colors = {
-  light: {
-    text: '#17151E',
-    background: '#F6F4F8',
-    backgroundElement: '#FFFFFF',
-    backgroundSelected: '#EAE6F5',
-    textSecondary: '#777282',
-    border: '#E7E2EC',
-    accent: '#FF5C64',
-    accentSecondary: '#7357E8',
-  },
-  dark: {
-    text: '#F8F5FC',
-    background: '#111016',
-    backgroundElement: '#1B1921',
-    backgroundSelected: '#292335',
-    textSecondary: '#A8A2B2',
-    border: '#2C2834',
-    accent: '#FF6670',
-    accentSecondary: '#967FFF',
-  },
+  light: RocketColorsLight,
+  dark: RocketColorsDark,
 } as const;
 
 export type ThemeColor = keyof typeof Colors.light & keyof typeof Colors.dark;
@@ -57,15 +42,7 @@ export const Fonts = Platform.select({
   },
 });
 
-export const Spacing = {
-  half: 2,
-  one: 4,
-  two: 8,
-  three: 16,
-  four: 24,
-  five: 32,
-  six: 64,
-} as const;
+export const Spacing = DesignSystemSpacing;
 
 export const BottomTabInset = Platform.select({ ios: 50, android: 80 }) ?? 0;
 export const MaxContentWidth = 800;

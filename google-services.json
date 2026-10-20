@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "1058072751694",
+    "project_id": "rocket-87c6a",
+    "storage_bucket": "rocket-87c6a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1058072751694:android:43316ec9c9377a0c7d5d1f",
+        "android_client_info": {
+          "package_name": "com.kowshikreddy.rocket"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1058072751694-741cp7udaral2l83harcp70f8ejn2psj.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kowshikreddy.rocket",
+            "certificate_hash": "7d5cd002dd4ddc33a0e61efa86c6f341a6e5cc9c"
+          }
+        },
+        {
+          "client_id": "1058072751694-r3ha5mfngv35l65m8aupch0mq32sfgt6.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC_mCMahHebZRL9F5217lunmgY2j1VuA44"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1058072751694-r3ha5mfngv35l65m8aupch0mq32sfgt6.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

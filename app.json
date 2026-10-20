@@ -4,19 +4,19 @@
     "slug": "Rocket",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/rocket-logo.png",
     "scheme": "rocket",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/images/rocket-logo.png",
+      "bitcode": false
     },
     "android": {
       "package": "com.kowshikreddy.rocket",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "backgroundColor": "#080B18",
+        "foregroundImage": "./assets/images/rocket-logo.png"
       },
       "predictiveBackGestureEnabled": false,
       "permissions": [
@@ -24,11 +24,20 @@
         "android.permission.INTERNET",
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.CHANGE_NETWORK_STATE",
-        "android.permission.MODIFY_AUDIO_SETTINGS"
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.CAMERA",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT"
       ],
-      "blockedPermissions": [
-        "android.permission.CAMERA"
-      ]
+      "blockedPermissions": []
     },
     "web": {
       "output": "static",
@@ -37,19 +46,66 @@
     "plugins": [
       "expo-router",
       [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Allow Rocket to use your camera when you choose to capture an attachment.",
+          "photosPermission": "Allow Rocket to access photos and videos you choose to share."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "backgroundColor": "#080B18",
+          "image": "./assets/images/rocket-logo.png",
+          "imageWidth": 180
         }
       ],
       "expo-video",
-      "@config-plugins/react-native-webrtc"
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/notification-icon.png",
+          "color": "#208AEF",
+          "defaultChannel": "messages"
+        }
+      ],
+      "@config-plugins/react-native-webrtc",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Rocket to access your location when you choose to share it in a chat."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Rocket to access your microphone to record voice messages.",
+          "enableBackgroundRecording": false
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow Rocket to use Face ID to unlock the app."
+        }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true
+        }
+      ],
+      "@react-native-google-signin/google-signin"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "3b80e028-f2fa-469f-9192-220b602d0b7a"
+      }
     }
   }
 }

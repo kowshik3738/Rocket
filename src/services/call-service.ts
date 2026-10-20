@@ -22,6 +22,8 @@ import {
   getFirestoreTimestampMillis,
   recordCallHistory,
 } from '@/services/messaging-service';
+import { dispatchPushNotification } from '@/services/notification-service';
+import InCallManager from 'react-native-incall-manager';
 
 const STUN_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 const TERMINAL_PHASES = new Set<CallPhase>(['cancelled', 'declined', 'failed', 'ended']);
@@ -35,7 +37,7 @@ function firestoreErrorDetails(error: Error) {
 
 export type CallPhase = 'ringing' | 'accepted' | 'cancelled' | 'declined' | 'failed' | 'ended';
 export type CallRole = 'caller' | 'callee';
-export type CallStatus = 'idle' | 'ringing' | 'connecting' | 'connected' | 'ended';
+export type CallStatus = 'idle' | 'calling' | 'ringing' | 'connecting' | 'connected' | 'ended';
 
 export type CallRecord = {
   id: string;
@@ -59,6 +61,7 @@ export type CallState = {
   role: CallRole | null;
   status: CallStatus;
   muted: boolean;
+  speakerphoneOn: boolean;
   error: string | null;
 };
 
@@ -75,6 +78,9 @@ type CallSession = {
   call: CallRecord | null;
   status: CallStatus;
   muted: boolean;
+  speakerphoneOn: boolean;
+  inCallAudioStarted: boolean;
+  inCallAudioStartGeneration: number;
   error: string | null;
   peer: RTCPeerConnection | null;
   localStream: MediaStream | null;
@@ -91,7 +97,14 @@ type CallSession = {
 };
 
 let activeSession: CallSession | null = null;
-let state: CallState = { call: null, role: null, status: 'idle', muted: false, error: null };
+let state: CallState = {
+  call: null,
+  role: null,
+  status: 'idle',
+  muted: false,
+  speakerphoneOn: false,
+  error: null,
+};
 const stateListeners = new Set<(nextState: CallState) => void>();
 
 function isCallPhase(value: unknown): value is CallPhase {
@@ -235,8 +248,22 @@ function getRole(call: CallRecord, userId: string): CallRole | null {
 
 function publish(session: CallSession | null = activeSession) {
   state = session
-    ? { call: session.call, role: session.role, status: session.status, muted: session.muted, error: session.error }
-    : { call: null, role: null, status: 'idle', muted: false, error: null };
+    ? {
+      call: session.call,
+      role: session.role,
+      status: session.status,
+      muted: session.muted,
+      speakerphoneOn: session.speakerphoneOn,
+      error: session.error,
+    }
+    : {
+      call: null,
+      role: null,
+      status: 'idle',
+      muted: false,
+      speakerphoneOn: false,
+      error: null,
+    };
   stateListeners.forEach((listener) => listener(state));
 }
 
@@ -254,6 +281,9 @@ function createSession(callId: string, userId: string, role: CallRole | null = n
     call: null,
     status: 'idle',
     muted: false,
+    speakerphoneOn: false,
+    inCallAudioStarted: false,
+    inCallAudioStartGeneration: 0,
     error: null,
     peer: null,
     localStream: null,
@@ -270,9 +300,82 @@ function createSession(callId: string, userId: string, role: CallRole | null = n
   };
 }
 
+function startOutgoingRingback() {
+  try {
+    InCallManager.stopRingback();
+    InCallManager.start({ media: 'audio', auto: true, ringback: '_DTMF_' });
+  } catch (error) {
+    console.warn('[Rocket call] could not start outgoing ringback', error);
+  }
+}
+
+function stopOutgoingRingback() {
+  try {
+    InCallManager.stopRingback();
+  } catch (error) {
+    console.warn('[Rocket call] could not stop outgoing ringback', error);
+  }
+}
+
+function startIncomingRingtone() {
+  try {
+    InCallManager.startRingtone('_DEFAULT_', [0, 250], 'default', 30);
+  } catch (error) {
+    console.warn('[Rocket call] could not start incoming ringtone', error);
+  }
+}
+
+function stopIncomingRingtone() {
+  try {
+    InCallManager.stopRingtone();
+  } catch (error) {
+    console.warn('[Rocket call] could not stop incoming ringtone', error);
+  }
+}
+
+async function requestBluetoothAudioPermission() {
+  if (Platform.OS !== 'android' || Number(Platform.Version) < 31) return;
+
+  const permission = PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT;
+  if (await PermissionsAndroid.check(permission)) return;
+
+  const result = await PermissionsAndroid.request(permission, {
+    title: 'Allow Bluetooth call audio',
+    message: 'Rocket needs Nearby devices access to use a Bluetooth headset during voice calls.',
+    buttonPositive: 'Allow',
+  });
+  if (result !== PermissionsAndroid.RESULTS.GRANTED) {
+    console.warn('Bluetooth call audio permission was not granted.');
+  }
+}
+
+async function startInCallAudio(session: CallSession) {
+  if (session.inCallAudioStarted) return;
+  const generation = ++session.inCallAudioStartGeneration;
+  await requestBluetoothAudioPermission();
+  if (
+    activeSession !== session
+    || session.inCallAudioStartGeneration !== generation
+    || TERMINAL_PHASES.has(session.call?.phase ?? 'ended')
+  ) return;
+  InCallManager.start({ media: 'audio' });
+  session.inCallAudioStarted = true;
+}
+
+function stopInCallAudio(session: CallSession) {
+  session.inCallAudioStartGeneration += 1;
+  if (!session.inCallAudioStarted) return;
+  InCallManager.stop();
+  session.inCallAudioStarted = false;
+  session.speakerphoneOn = false;
+}
+
 function stopTransport(session: CallSession, _reason: string) {
+  stopOutgoingRingback();
+  stopIncomingRingtone();
   session.unsubscribeRemoteCandidates?.();
   session.unsubscribeRemoteCandidates = null;
+  stopInCallAudio(session);
   session.peer?.close();
   session.peer = null;
   session.localStream?.getTracks().forEach((track) => track.stop());
@@ -475,6 +578,8 @@ async function preparePeer(session: CallSession) {
   peer.onconnectionstatechange = () => {
     if (activeSession !== session) return;
     if (peer.connectionState === 'connected') {
+      stopOutgoingRingback();
+      stopIncomingRingtone();
       session.hasConnected = true;
       session.status = 'connected';
       publish(session);
@@ -508,6 +613,7 @@ async function applyAnswer(session: CallSession, call: CallRecord) {
 }
 
 async function processCallSnapshot(session: CallSession, call: CallRecord) {
+  if (activeSession !== session) return;
   const role = getRole(call, session.userId);
   if (!role) {
     setError(session, 'You are not a participant in this call.', 'ended');
@@ -523,25 +629,37 @@ async function processCallSnapshot(session: CallSession, call: CallRecord) {
   }
 
   if (call.phase === 'accepted') {
+    stopOutgoingRingback();
+    stopIncomingRingtone();
+    await startInCallAudio(session);
+    if (activeSession !== session || TERMINAL_PHASES.has(session.call?.phase ?? 'ended')) return;
     session.status = session.hasConnected ? 'connected' : 'connecting';
     publish(session);
     if (role === 'caller') {
       try {
         await applyAnswer(session, call);
       } catch (error) {
-        setError(session, error, 'ended');
+        if (activeSession === session) setError(session, error, 'ended');
       }
     }
     return;
   }
 
-  session.status = 'ringing';
+  if (role === 'caller') {
+    startOutgoingRingback();
+    session.status = 'calling';
+  } else {
+    stopOutgoingRingback();
+    startIncomingRingtone();
+    session.status = 'ringing';
+  }
   publish(session);
 }
 
 function subscribeToCallDocument(session: CallSession) {
   session.unsubscribeCall?.();
   session.unsubscribeCall = onSnapshot(callRef(session.callId), (snapshot) => {
+    if (activeSession !== session) return;
     if (!snapshot.exists()) {
       setError(session, 'This call is no longer available.', 'ended');
       return;
@@ -553,7 +671,7 @@ function subscribeToCallDocument(session: CallSession) {
     }
     void processCallSnapshot(session, call);
   }, (error) => {
-    setError(session, error, 'ended');
+    if (activeSession === session) setError(session, error, 'ended');
   });
 }
 
@@ -617,6 +735,7 @@ export async function startOutgoingCall(conversationId: string, callerId: string
     await preparePeer(session);
     const offer = await session.peer!.createOffer();
     await session.peer!.setLocalDescription(offer);
+    startOutgoingRingback();
     await setDoc(reference, {
       conversationId,
       callerId,
@@ -628,6 +747,15 @@ export async function startOutgoingCall(conversationId: string, callerId: string
       createdAt: serverTimestamp(),
     });
     session.callWritten = true;
+    void dispatchPushNotification({
+      recipientUid: calleeId,
+      kind: 'call',
+      data: {
+        callId: reference.id,
+      },
+    }).catch((err) => {
+      console.warn(`[Push] Failed to dispatch voice call notification to ${calleeId}:`, err);
+    });
     await flushLocalCandidates(session);
     session.call = {
       id: reference.id,
@@ -645,7 +773,7 @@ export async function startOutgoingCall(conversationId: string, callerId: string
       endedAt: null,
       endedBy: null,
     };
-    session.status = 'ringing';
+    session.status = 'calling';
     subscribeToCallDocument(session);
     subscribeToRemoteCandidates(session);
     publish(session);
@@ -665,6 +793,8 @@ export async function acceptIncomingCall() {
   }
 
   try {
+    stopIncomingRingtone();
+    stopOutgoingRingback();
     // The incoming call document already exists, so local ICE candidates may
     // safely be written while the answer is being prepared.
     session.callWritten = true;
@@ -681,11 +811,13 @@ export async function acceptIncomingCall() {
       answerSdp: answer.sdp,
       answeredAt: serverTimestamp(),
     });
+    await startInCallAudio(session);
+    if (activeSession !== session || TERMINAL_PHASES.has(session.call?.phase ?? 'ended')) return;
     session.status = session.hasConnected ? 'connected' : 'connecting';
     publish(session);
   } catch (error) {
     stopTransport(session, 'incoming-accept-failed');
-    setError(session, error, 'ringing');
+    if (activeSession === session) setError(session, error, 'ringing');
     throw error;
   }
 }
@@ -695,6 +827,8 @@ export async function declineIncomingCall() {
   if (!session.call || session.role !== 'callee' || session.call.phase !== 'ringing') {
     throw new Error('This call can no longer be declined.');
   }
+  stopIncomingRingtone();
+  stopOutgoingRingback();
   await updateDoc(callRef(session.callId), {
     phase: 'declined',
     endedAt: serverTimestamp(),
@@ -709,6 +843,8 @@ export async function cancelOutgoingCall() {
   if (!session.call || session.role !== 'caller' || session.call.phase !== 'ringing') {
     throw new Error('This call can no longer be cancelled.');
   }
+  stopOutgoingRingback();
+  stopIncomingRingtone();
   await updateDoc(callRef(session.callId), {
     phase: 'cancelled',
     endedAt: serverTimestamp(),
@@ -766,7 +902,7 @@ async function failConnection(session: CallSession) {
         const snapshot = await getDocFromServer(callRef(session.callId));
         const data = snapshot.exists() ? snapshot.data() : null;
         const terminalCall = data ? mapCall(snapshot.id, data) : null;
-        if (terminalCall && TERMINAL_PHASES.has(terminalCall.phase)) {
+        if (activeSession === session && terminalCall && TERMINAL_PHASES.has(terminalCall.phase)) {
           session.call = terminalCall;
           markTerminal(session);
           return;
@@ -775,7 +911,10 @@ async function failConnection(session: CallSession) {
         // Preserve the original failure below if the authoritative read fails.
       }
     }
-    setError(session, error, 'ended');
+    if (activeSession === session) {
+      stopTransport(session, 'failed-terminal-write');
+      setError(session, error, 'ended');
+    }
   } finally {
     session.terminalTransitionInFlight = false;
   }
@@ -789,6 +928,35 @@ export function toggleMute(): boolean {
   session.muted = !track.enabled;
   publish(session);
   return session.muted;
+}
+
+type AudioRouteStatus = {
+  selectedAudioDevice?: string;
+  communicationDevice?: string;
+};
+
+export async function toggleSpeakerphone(): Promise<boolean> {
+  const session = requireActiveSession();
+  if (session.call?.phase !== 'accepted' || !session.inCallAudioStarted) {
+    throw new Error('Speaker routing is available only during an active voice call.');
+  }
+
+  const speakerphoneOn = !session.speakerphoneOn;
+  if (Platform.OS === 'android') {
+    const route = await InCallManager.chooseAudioRoute(speakerphoneOn ? 'SPEAKER_PHONE' : 'NONE') as AudioRouteStatus;
+    if (activeSession !== session || session.call?.phase !== 'accepted' || !session.inCallAudioStarted) {
+      throw new Error('Speaker routing is no longer available for this call.');
+    }
+    const selectedRoute = Number(Platform.Version) >= 31 ? route.communicationDevice : route.selectedAudioDevice;
+    if (speakerphoneOn ? selectedRoute !== 'SPEAKER_PHONE' : selectedRoute === 'SPEAKER_PHONE') {
+      throw new Error('Speaker routing could not be confirmed.');
+    }
+  } else {
+    InCallManager.setForceSpeakerphoneOn(speakerphoneOn);
+  }
+  session.speakerphoneOn = speakerphoneOn;
+  publish(session);
+  return speakerphoneOn;
 }
 
 export function dismissEndedCall(callId: string) {

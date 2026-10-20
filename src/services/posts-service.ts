@@ -4,6 +4,7 @@ import {
   deleteDoc,
   doc,
   getCountFromServer,
+  getDoc,
   getDocs,
   limit,
   onSnapshot,
@@ -16,7 +17,8 @@ import {
 } from 'firebase/firestore';
 
 import { db } from '@/lib/firebase';
-import { getUserProfile, UserProfile } from '@/services/user-service';
+import { dispatchPushNotification } from '@/services/notification-service';
+import { getUserProfile, isValidProfilePhotoUrl, UserProfile } from '@/services/user-service';
 
 export type Post = {
   postId: string;
@@ -92,6 +94,9 @@ export function subscribeToFeed(
         username: data.username as string,
         usernameLower: data.usernameLower as string,
         bio: (data.bio as string | undefined) ?? '',
+        photoUrl: typeof data.photoUrl === 'string' && isValidProfilePhotoUrl(data.photoUrl)
+          ? data.photoUrl
+          : undefined,
         createdAt: (data.createdAt as Timestamp | undefined) ?? null,
       });
       publish();
@@ -149,13 +154,68 @@ export function subscribeToPostStats(
   };
 }
 
+async function notifyPostAuthorOfLike(postId: string, viewerUid: string): Promise<void> {
+  try {
+    const postDoc = await getDoc(doc(db, 'posts', postId));
+    if (!postDoc.exists()) return;
+    const postAuthorUid = postDoc.data()?.authorUid as string | undefined;
+    if (!postAuthorUid || postAuthorUid === viewerUid) return;
+
+    void dispatchPushNotification({
+      recipientUid: postAuthorUid,
+      kind: 'social',
+      data: {
+        subkind: 'like',
+        postId,
+      },
+    }).catch((err) => {
+      console.warn(`[Push] Failed to dispatch like notification to ${postAuthorUid}:`, err);
+    });
+  } catch (err) {
+    console.warn('[Push] Failed to look up post author for like notification:', err);
+  }
+}
+
+async function notifyPostAuthorOfComment(postId: string, commentId: string, commenterUid: string): Promise<void> {
+  try {
+    const postDoc = await getDoc(doc(db, 'posts', postId));
+    if (!postDoc.exists()) return;
+    const postAuthorUid = postDoc.data()?.authorUid as string | undefined;
+    if (!postAuthorUid || postAuthorUid === commenterUid) return;
+
+    void dispatchPushNotification({
+      recipientUid: postAuthorUid,
+      kind: 'social',
+      data: {
+        subkind: 'comment',
+        postId,
+        commentId,
+      },
+    }).catch((err) => {
+      console.warn(`[Push] Failed to dispatch comment notification to ${postAuthorUid}:`, err);
+    });
+  } catch (err) {
+    console.warn('[Push] Failed to look up post author for comment notification:', err);
+  }
+}
+
 export async function toggleLike(postId: string, viewerUid: string): Promise<void> {
   const likeRef = doc(db, 'posts', postId, 'likes', viewerUid);
+  let wasLiked = false;
   await runTransaction(db, async (transaction) => {
     const likeSnapshot = await transaction.get(likeRef);
-    if (likeSnapshot.exists()) transaction.delete(likeRef);
-    else transaction.set(likeRef, { userUid: viewerUid, createdAt: serverTimestamp() });
+    if (likeSnapshot.exists()) {
+      transaction.delete(likeRef);
+      wasLiked = false;
+    } else {
+      transaction.set(likeRef, { userUid: viewerUid, createdAt: serverTimestamp() });
+      wasLiked = true;
+    }
   });
+
+  if (wasLiked) {
+    void notifyPostAuthorOfLike(postId, viewerUid);
+  }
 }
 
 export async function likePost(postId: string, viewerUid: string): Promise<void> {
@@ -164,12 +224,20 @@ export async function likePost(postId: string, viewerUid: string): Promise<void>
 
 export async function setLikeState(postId: string, viewerUid: string, liked: boolean): Promise<void> {
   const likeRef = doc(db, 'posts', postId, 'likes', viewerUid);
+  let justLiked = false;
   await runTransaction(db, async (transaction) => {
     const likeSnapshot = await transaction.get(likeRef);
     if (liked && !likeSnapshot.exists()) {
       transaction.set(likeRef, { userUid: viewerUid, createdAt: serverTimestamp() });
-    } else if (!liked && likeSnapshot.exists()) transaction.delete(likeRef);
+      justLiked = true;
+    } else if (!liked && likeSnapshot.exists()) {
+      transaction.delete(likeRef);
+    }
   });
+
+  if (justLiked) {
+    void notifyPostAuthorOfLike(postId, viewerUid);
+  }
 }
 
 export async function getPostComments(postId: string): Promise<PostComment[]> {
@@ -204,11 +272,13 @@ export async function addComment(postId: string, authorUid: string, text: string
   const cleanText = text.trim();
   if (!cleanText) throw new Error('Write a comment before sending.');
   if (cleanText.length > MAX_COMMENT_LENGTH) throw new Error('Comments must be 500 characters or fewer.');
-  await addDoc(collection(db, 'posts', postId, 'comments'), {
+  const commentRef = await addDoc(collection(db, 'posts', postId, 'comments'), {
     authorUid,
     text: cleanText,
     createdAt: serverTimestamp(),
   });
+
+  void notifyPostAuthorOfComment(postId, commentRef.id, authorUid);
 }
 
 export async function getPostCount(authorUid: string): Promise<number> {

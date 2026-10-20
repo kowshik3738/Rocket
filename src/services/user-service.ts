@@ -1,10 +1,12 @@
-import { deleteUser, User as FirebaseUser } from 'firebase/auth';
+import { User as FirebaseUser } from 'firebase/auth';
 import {
+    deleteField,
     doc,
     getDoc,
     runTransaction,
     serverTimestamp,
     Timestamp,
+    updateDoc,
 } from 'firebase/firestore';
 
 import { db } from '@/lib/firebase';
@@ -15,12 +17,19 @@ export type UserProfile = {
   username: string;
   usernameLower: string;
   bio: string;
+  photoUrl?: string;
   createdAt: Timestamp | null;
 };
 
 const USERNAME_PATTERN = /^[a-z0-9_.]+$/;
 const USERNAME_MIN_LENGTH = 3;
 const USERNAME_MAX_LENGTH = 30;
+const PROFILE_PHOTO_URL_PATTERN =
+  /^https:\/\/res[.]cloudinary[.]com\/cmpoe94k\/image\/upload\/[A-Za-z0-9_-][A-Za-z0-9_.-]*(\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/;
+
+export function isValidProfilePhotoUrl(photoUrl: string): boolean {
+  return PROFILE_PHOTO_URL_PATTERN.test(photoUrl);
+}
 
 export function normalizeUsername(username: string): string {
   return username.trim().toLowerCase();
@@ -45,38 +54,52 @@ export async function createUserProfile(
   displayName: string,
   username: string,
 ): Promise<UserProfile> {
+  const usernameError = validateUsername(username);
+  if (usernameError) {
+    throw new Error(usernameError);
+  }
+
   const normalizedUsername = normalizeUsername(username);
   const profileRef = doc(db, 'users', firebaseUser.uid);
   const usernameRef = doc(db, 'usernames', normalizedUsername);
 
-  try {
-    const createdProfile = await runTransaction(db, async (transaction) => {
-      const usernameSnapshot = await transaction.get(usernameRef);
-      if (usernameSnapshot.exists()) {
-        throw new Error('username-already-in-use');
-      }
+  return runTransaction(db, async (transaction) => {
+    const [profileSnapshot, usernameSnapshot] = await Promise.all([
+      transaction.get(profileRef),
+      transaction.get(usernameRef),
+    ]);
+    if (profileSnapshot.exists()) {
+      throw new Error('profile-already-exists');
+    }
+    if (usernameSnapshot.exists()) {
+      throw new Error('username-already-in-use');
+    }
 
-      const profile: UserProfile = {
-        uid: firebaseUser.uid,
-        displayName: displayName.trim(),
-        username: username.trim(),
-        usernameLower: normalizedUsername,
-        bio: '',
-        createdAt: null,
-      };
+    const profile: UserProfile = {
+      uid: firebaseUser.uid,
+      displayName: displayName.trim() || username.trim(),
+      username: username.trim(),
+      usernameLower: normalizedUsername,
+      bio: '',
+      createdAt: null,
+    };
 
-      transaction.set(usernameRef, { uid: firebaseUser.uid });
-      transaction.set(profileRef, {
-        ...profile,
-        createdAt: serverTimestamp(),
-      });
-      return profile;
+    transaction.set(usernameRef, { uid: firebaseUser.uid });
+    transaction.set(profileRef, {
+      ...profile,
+      createdAt: serverTimestamp(),
     });
-    return createdProfile;
-  } catch (error) {
-    await deleteUser(firebaseUser).catch(() => undefined);
-    throw error;
+    return profile;
+  });
+}
+
+export async function isUsernameAvailable(username: string): Promise<boolean> {
+  const usernameError = validateUsername(username);
+  if (usernameError) {
+    throw new Error(usernameError);
   }
+  const snapshot = await getDoc(doc(db, 'usernames', normalizeUsername(username)));
+  return !snapshot.exists();
 }
 
 export async function getUserProfile(uid: string): Promise<UserProfile | null> {
@@ -92,8 +115,21 @@ export async function getUserProfile(uid: string): Promise<UserProfile | null> {
     username: data.username,
     usernameLower: data.usernameLower,
     bio: data.bio ?? '',
+    photoUrl: typeof data.photoUrl === 'string' && isValidProfilePhotoUrl(data.photoUrl)
+      ? data.photoUrl
+      : undefined,
     createdAt: data.createdAt ?? null,
   };
+}
+
+export async function updateUserPhotoUrl(uid: string, photoUrl: string | null): Promise<void> {
+  if (photoUrl !== null && !isValidProfilePhotoUrl(photoUrl)) {
+    throw new Error('The uploaded photo URL is not a trusted Rocket image.');
+  }
+
+  await updateDoc(doc(db, 'users', uid), {
+    photoUrl: photoUrl === null ? deleteField() : photoUrl,
+  });
 }
 
 export async function updateUserProfile(
@@ -138,6 +174,7 @@ export async function updateUserProfile(
       username: username.trim(),
       usernameLower: normalizedUsername,
       bio: cleanBio,
+      photoUrl: typeof currentData.photoUrl === 'string' ? currentData.photoUrl : undefined,
       createdAt: currentData.createdAt ?? null,
     };
 

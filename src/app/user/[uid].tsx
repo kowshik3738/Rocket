@@ -1,35 +1,86 @@
-import { useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { router, useLocalSearchParams } from 'expo-router';
+import React, { useEffect, useState } from 'react';
+import {
+  Alert,
+  FlatList,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 
-import { PostCard } from '@/components/post-card';
-import { Avatar, Card, colors, Screen } from '@/components/rocket-ui';
 import { useAuth } from '@/providers/auth-provider';
+import { createOrGetConversation } from '@/services/messaging-service';
 import { getPostCount, Post, subscribeToFeed } from '@/services/posts-service';
-import { REPORT_REASONS, REPORT_REASON_LABELS, ReportReason, reportUser } from '@/services/report-service';
-import { blockUser, getFriends, getRelationshipStatus, RelationshipStatus, unblockUser, unfriend } from '@/services/social-service';
-import { getProfileColor, getProfileInitials, getUserProfile, UserProfile } from '@/services/user-service';
+import {
+  REPORT_REASONS,
+  REPORT_REASON_LABELS,
+  ReportReason,
+  reportUser,
+} from '@/services/report-service';
+import {
+  blockUser,
+  getFriends,
+  getRelationshipStatus,
+  RelationshipStatus,
+  sendFriendRequest,
+  unblockUser,
+  unfriend,
+} from '@/services/social-service';
+import {
+  getProfileColor,
+  getProfileInitials,
+  getUserProfile,
+  UserProfile,
+} from '@/services/user-service';
+import {
+  RocketButton,
+  RocketEmptyState,
+  RocketIconButton,
+  RocketLoadingIndicator,
+  RocketPostCard,
+  RocketPressable,
+  RocketProfileHero,
+  RocketScreen,
+  RocketText,
+  useRocketTheme,
+} from '@/design-system';
+import { Radius } from '@/design-system/tokens/radius';
+import { SpacingScale } from '@/design-system/tokens/spacing';
 
 export default function OtherUserProfileScreen() {
   const { user } = useAuth();
+  const { colors } = useRocketTheme();
   const params = useLocalSearchParams<{ uid?: string | string[] }>();
   const uid = Array.isArray(params.uid) ? params.uid[0] : params.uid;
   const normalizedUid = uid ? String(uid) : null;
   const isOwnProfile = !!user && !!normalizedUid && user.uid === normalizedUid;
+
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [friendCount, setFriendCount] = useState(0);
   const [postCount, setPostCount] = useState(0);
   const [posts, setPosts] = useState<Post[]>([]);
   const [relationship, setRelationship] = useState<RelationshipStatus | null>(null);
+
   const [unfriending, setUnfriending] = useState(false);
   const [blocking, setBlocking] = useState(false);
   const [unblocking, setUnblocking] = useState(false);
+  const [sendingRequest, setSendingRequest] = useState(false);
+  const [openingChat, setOpeningChat] = useState(false);
+
+  const [showActionSheet, setShowActionSheet] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [reportReason, setReportReason] = useState<ReportReason>('spam');
   const [reportDetails, setReportDetails] = useState('');
   const [submittingReport, setSubmittingReport] = useState(false);
   const [reportError, setReportError] = useState('');
   const [actionError, setActionError] = useState('');
+
   const [profileLoading, setProfileLoading] = useState(true);
   const [postsLoading, setPostsLoading] = useState(true);
 
@@ -63,20 +114,18 @@ export default function OtherUserProfileScreen() {
         }
 
         if (user?.uid === safeUid) {
-          void Promise.all([getFriends(safeUid), getPostCount(safeUid)]).then(([friends, postsTotal]) => {
-            setFriendCount(friends.length);
-            setPostCount(postsTotal);
-          }).catch((error: unknown) => {
-            const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: string }).code) : 'unknown';
-            console.warn('OtherUserProfileScreen own stats failed', { uid: safeUid, code });
-            setFriendCount(0);
-            setPostCount(0);
-          });
+          void Promise.all([getFriends(safeUid), getPostCount(safeUid)])
+            .then(([friends, postsTotal]) => {
+              setFriendCount(friends.length);
+              setPostCount(postsTotal);
+            })
+            .catch(() => {
+              setFriendCount(0);
+              setPostCount(0);
+            });
         }
       })
-      .catch((error: unknown) => {
-        const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: string }).code) : 'unknown';
-        console.warn('OtherUserProfileScreen profile read failed', { uid: safeUid, code });
+      .catch(() => {
         setProfile(null);
         setFriendCount(0);
         setPostCount(0);
@@ -84,39 +133,57 @@ export default function OtherUserProfileScreen() {
       })
       .finally(() => setProfileLoading(false));
 
-    unsubscribePosts = subscribeToFeed(safeUid, [safeUid], (nextPosts) => {
-      setPosts(nextPosts);
-      setPostsLoading(false);
-    }, (error: Error) => {
-      const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: string }).code) : 'unknown';
-      console.warn('OtherUserProfileScreen posts read failed', { uid: safeUid, code });
-      setPosts([]);
-      setPostsLoading(false);
-    });
+    unsubscribePosts = subscribeToFeed(
+      safeUid,
+      [safeUid],
+      (nextPosts) => {
+        setPosts(nextPosts);
+        setPostsLoading(false);
+      },
+      () => {
+        setPosts([]);
+        setPostsLoading(false);
+      }
+    );
 
     return () => unsubscribePosts();
   }, [uid, user?.uid]);
 
-  if (!uid) {
-    return <Screen scroll={false}><View style={page.state}><Text style={page.stateTitle}>User profile not found</Text></View></Screen>;
+  // Handlers for social actions
+  async function handleSendRequest() {
+    if (!user || !profile || sendingRequest || relationship !== 'add') return;
+    setSendingRequest(true);
+    setActionError('');
+    try {
+      await sendFriendRequest(user.uid, profile.uid);
+      setRelationship('sent');
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : 'Could not send friend request.'
+      );
+    } finally {
+      setSendingRequest(false);
+    }
   }
 
-  if (profileLoading) {
-    return <Screen scroll={false}><View style={page.state}><ActivityIndicator color={colors.accent} /><Text style={page.stateText}>Loading profile...</Text></View></Screen>;
+  async function handleOpenChat() {
+    if (!user || !profile || openingChat) return;
+    setOpeningChat(true);
+    setActionError('');
+    try {
+      const conversationId = await createOrGetConversation(user.uid, profile.uid);
+      router.push(`/chat/${conversationId}`);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : 'Could not open conversation.'
+      );
+    } finally {
+      setOpeningChat(false);
+    }
   }
-
-  if (!profile) {
-    return <Screen scroll={false}><View style={page.state}><Text style={page.stateTitle}>Profile not found</Text><Text style={page.stateText}>This user could not be loaded.</Text></View></Screen>;
-  }
-
-  const profileUser = {
-    name: profile.displayName,
-    handle: profile.username,
-    initials: getProfileInitials(profile.displayName),
-    color: getProfileColor(profile.uid),
-  };
 
   function handleConfirmUnfriend() {
+    setShowActionSheet(false);
     if (!user || !profile || unfriending) return;
     Alert.alert(
       'Remove Friend',
@@ -130,7 +197,7 @@ export default function OtherUserProfileScreen() {
             void executeUnfriend();
           },
         },
-      ],
+      ]
     );
   }
 
@@ -142,13 +209,18 @@ export default function OtherUserProfileScreen() {
       await unfriend(user.uid, profile.uid);
       setRelationship('add');
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Could not remove friend. Check your connection and try again.');
+      setActionError(
+        err instanceof Error
+          ? err.message
+          : 'Could not remove friend. Check your connection and try again.'
+      );
     } finally {
       setUnfriending(false);
     }
   }
 
   function handleConfirmBlock() {
+    setShowActionSheet(false);
     if (!user || !profile || blocking || unfriending) return;
     Alert.alert(
       'Block User',
@@ -162,7 +234,7 @@ export default function OtherUserProfileScreen() {
             void executeBlock();
           },
         },
-      ],
+      ]
     );
   }
 
@@ -175,13 +247,18 @@ export default function OtherUserProfileScreen() {
       setRelationship('blocked');
       setPosts([]);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Could not block user. Check your connection and try again.');
+      setActionError(
+        err instanceof Error
+          ? err.message
+          : 'Could not block user. Check your connection and try again.'
+      );
     } finally {
       setBlocking(false);
     }
   }
 
   function handleConfirmUnblock() {
+    setShowActionSheet(false);
     if (!user || !profile || unblocking) return;
     Alert.alert(
       'Unblock User',
@@ -194,7 +271,7 @@ export default function OtherUserProfileScreen() {
             void executeUnblock();
           },
         },
-      ],
+      ]
     );
   }
 
@@ -206,13 +283,18 @@ export default function OtherUserProfileScreen() {
       await unblockUser(user.uid, profile.uid);
       setRelationship('add');
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Could not unblock user. Check your connection and try again.');
+      setActionError(
+        err instanceof Error
+          ? err.message
+          : 'Could not unblock user. Check your connection and try again.'
+      );
     } finally {
       setUnblocking(false);
     }
   }
 
   function handleOpenReportModal() {
+    setShowActionSheet(false);
     setReportReason('spam');
     setReportDetails('');
     setReportError('');
@@ -253,143 +335,525 @@ export default function OtherUserProfileScreen() {
                 void executeBlock();
               },
             },
-          ],
+          ]
         );
       } else {
         Alert.alert(
           'Report Submitted',
-          'Report submitted. Thank you for helping keep Rocket safe.',
+          'Report submitted. Thank you for helping keep Rocket safe.'
         );
       }
     } catch (err) {
-      setReportError(err instanceof Error ? err.message : 'Could not submit report. Check your connection and try again.');
+      setReportError(
+        err instanceof Error
+          ? err.message
+          : 'Could not submit report. Check your connection and try again.'
+      );
     } finally {
       setSubmittingReport(false);
     }
   }
 
+  // Not found or Loading states
+  if (!uid) {
+    return (
+      <RocketScreen scroll={false}>
+        <RocketEmptyState
+          action={
+            <RocketButton
+              label="Go back"
+              onPress={() => router.back()}
+              size="md"
+              variant="secondary"
+            />
+          }
+          body="No user identifier was provided."
+          title="User profile not found"
+        />
+      </RocketScreen>
+    );
+  }
+
+  if (profileLoading) {
+    return (
+      <RocketScreen scroll={false}>
+        <View style={styles.centerContainer}>
+          <RocketLoadingIndicator size="large" />
+          <RocketText color="secondary" style={styles.loadingText} variant="caption">
+            Loading profile...
+          </RocketText>
+        </View>
+      </RocketScreen>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <RocketScreen scroll={false}>
+        <RocketEmptyState
+          action={
+            <RocketButton
+              label="Go back"
+              onPress={() => router.back()}
+              size="md"
+              variant="secondary"
+            />
+          }
+          body="This user could not be loaded or may no longer exist."
+          title="Profile not found"
+        />
+      </RocketScreen>
+    );
+  }
+
+  const avatar = {
+    initials: getProfileInitials(profile.displayName),
+    color: getProfileColor(profile.uid),
+    source: profile.photoUrl,
+  };
+
+  // Determine primary action button for another user
+  const renderRelationshipActions = () => {
+    if (isOwnProfile) {
+      return (
+        <RocketButton
+          label="Edit profile"
+          onPress={() => router.push('/edit-profile')}
+          size="md"
+          variant="secondary"
+        />
+      );
+    }
+
+    if (relationship === 'blocked') {
+      return (
+        <View style={styles.actionRow}>
+          <RocketButton
+            disabled={unblocking}
+            label={unblocking ? 'Unblocking...' : 'Unblock user'}
+            loading={unblocking}
+            onPress={handleConfirmUnblock}
+            size="md"
+            style={styles.primaryActionButton}
+            variant="outline"
+          />
+          <RocketIconButton
+            accessibilityHint="More options for this user"
+            accessibilityLabel="More options"
+            glyph="⋯"
+            onPress={() => setShowActionSheet(true)}
+            size="md"
+            variant="filled"
+          />
+        </View>
+      );
+    }
+
+    if (relationship === 'friends') {
+      return (
+        <View style={styles.actionRow}>
+          <RocketButton
+            iconLeft={<Text style={styles.buttonIcon}>💬</Text>}
+            label={openingChat ? 'Opening...' : 'Message'}
+            loading={openingChat}
+            onPress={() => void handleOpenChat()}
+            size="md"
+            style={styles.primaryActionButton}
+            variant="primary"
+          />
+          <RocketIconButton
+            accessibilityHint="More options for this user"
+            accessibilityLabel="More options"
+            glyph="⋯"
+            onPress={() => setShowActionSheet(true)}
+            size="md"
+            variant="filled"
+          />
+        </View>
+      );
+    }
+
+    if (relationship === 'sent') {
+      return (
+        <View style={styles.actionRow}>
+          <RocketButton
+            disabled
+            iconLeft={<Text style={styles.buttonIcon}>✓</Text>}
+            label="Request sent"
+            size="md"
+            style={styles.primaryActionButton}
+            variant="secondary"
+          />
+          <RocketIconButton
+            accessibilityHint="More options for this user"
+            accessibilityLabel="More options"
+            glyph="⋯"
+            onPress={() => setShowActionSheet(true)}
+            size="md"
+            variant="filled"
+          />
+        </View>
+      );
+    }
+
+    if (relationship === 'incoming') {
+      return (
+        <View style={styles.actionRow}>
+          <RocketButton
+            label="View friend request"
+            onPress={() => router.push('/friends')}
+            size="md"
+            style={styles.primaryActionButton}
+            variant="primary"
+          />
+          <RocketIconButton
+            accessibilityHint="More options for this user"
+            accessibilityLabel="More options"
+            glyph="⋯"
+            onPress={() => setShowActionSheet(true)}
+            size="md"
+            variant="filled"
+          />
+        </View>
+      );
+    }
+
+    // Default: 'add'
+    return (
+      <View style={styles.actionRow}>
+        <RocketButton
+          iconLeft={<Text style={styles.buttonIcon}>＋</Text>}
+          label={sendingRequest ? 'Sending...' : 'Add friend'}
+          loading={sendingRequest}
+          onPress={() => void handleSendRequest()}
+          size="md"
+          style={styles.primaryActionButton}
+          variant="primary"
+        />
+        <RocketIconButton
+          accessibilityHint="More options for this user"
+          accessibilityLabel="More options"
+          glyph="⋯"
+          onPress={() => setShowActionSheet(true)}
+          size="md"
+          variant="filled"
+        />
+      </View>
+    );
+  };
+
   return (
-    <Screen>
-      <View style={page.profile}>
-        <Avatar user={profileUser} size={88} />
-        <Text style={page.name}>{profile.displayName}</Text>
-        <Text style={page.handle}>@{profile.username}</Text>
-        {profile.bio ? <Text style={page.bio}>{profile.bio}</Text> : null}
-        {isOwnProfile ? (
-          <View style={page.stats}>
-            <View><Text style={page.statNumber}>{postCount}</Text><Text style={page.statLabel}>Posts</Text></View>
-            <View><Text style={page.statNumber}>{friendCount}</Text><Text style={page.statLabel}>Friends</Text></View>
+    <RocketScreen
+      contentContainerStyle={styles.screenContent}
+      edges={['top']}
+      scroll={false}>
+      <FlatList
+        data={relationship === 'blocked' ? [] : posts}
+        keyExtractor={(item) => item.postId}
+        renderItem={({ item }) => <RocketPostCard post={item} />}
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        ListHeaderComponent={
+          <View style={styles.headerContainer}>
+            {/* Header bar: Back button + User handle + Options menu */}
+            <View style={styles.topBar}>
+              <RocketIconButton
+                accessibilityHint="Go back"
+                accessibilityLabel="Back"
+                glyph="‹"
+                glyphStyle={styles.backGlyph}
+                onPress={() => router.back()}
+                size="md"
+                variant="ghost"
+              />
+              <RocketText
+                color="secondary"
+                numberOfLines={1}
+                style={styles.headerHandle}
+                variant="bodyMedium">
+                @{profile.username}
+              </RocketText>
+              {!isOwnProfile ? (
+                <RocketIconButton
+                  accessibilityHint="User options"
+                  accessibilityLabel="Options"
+                  glyph="⋯"
+                  glyphStyle={styles.optionsGlyph}
+                  onPress={() => setShowActionSheet(true)}
+                  size="md"
+                  variant="ghost"
+                />
+              ) : (
+                <RocketIconButton
+                  accessibilityHint="Open settings"
+                  accessibilityLabel="Settings"
+                  glyph="⚙"
+                  onPress={() => router.push('/settings')}
+                  size="md"
+                  variant="ghost"
+                />
+              )}
+            </View>
+
+            {/* Profile Hero with Orbit Avatar, Identity, and Action Controls */}
+            <RocketProfileHero
+              avatar={avatar}
+              bio={profile.bio}
+              displayName={profile.displayName}
+              stats={
+                isOwnProfile
+                  ? [
+                      { label: 'Posts', value: postCount },
+                      {
+                        label: 'Friends',
+                        value: friendCount,
+                        onPress: () => router.push('/friends'),
+                      },
+                    ]
+                  : [
+                      {
+                        label: 'Posts',
+                        value: relationship === 'blocked' ? 0 : posts.length,
+                      },
+                    ]
+              }
+              actions={renderRelationshipActions()}
+              username={profile.username}
+            />
+
+            {/* Inline Action Error if any */}
+            {actionError ? (
+              <RocketText color="error" style={styles.actionError} variant="caption">
+                {actionError}
+              </RocketText>
+            ) : null}
+
+            {/* Section Transition */}
+            <View style={styles.sectionHeaderRow}>
+              <RocketText
+                color="primary"
+                style={styles.sectionTitle}
+                variant="sectionTitle">
+                Posts
+              </RocketText>
+              {relationship !== 'blocked' && posts.length > 0 ? (
+                <RocketText color="secondary" variant="caption">
+                  {posts.length} {posts.length === 1 ? 'post' : 'posts'}
+                </RocketText>
+              ) : null}
+            </View>
           </View>
-        ) : null}
-        {!isOwnProfile ? (
-          <View style={page.actions}>
-            {relationship === 'blocked' ? (
-              <View style={page.buttonRow}>
-                <Pressable
+        }
+        ListEmptyComponent={
+          relationship === 'blocked' ? (
+            <RocketEmptyState
+              body="You have blocked this user. Unblock them to see their posts and profile activity."
+              title="User blocked"
+            />
+          ) : postsLoading ? (
+            <View style={styles.stateContainer}>
+              <RocketLoadingIndicator size="normal" />
+              <RocketText color="secondary" style={styles.stateText} variant="caption">
+                Loading posts...
+              </RocketText>
+            </View>
+          ) : (
+            <RocketEmptyState
+              body={`${profile.displayName} has not shared any posts yet.`}
+              title="No posts yet"
+            />
+          )
+        }
+      />
+
+      {/* Secondary Options Action Sheet Modal */}
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setShowActionSheet(false)}
+        transparent
+        visible={showActionSheet}>
+        <Pressable
+          onPress={() => setShowActionSheet(false)}
+          style={styles.modalOverlay}>
+          <View
+            style={[
+              styles.actionSheetCard,
+              {
+                backgroundColor: colors.surfaceElevated,
+                borderColor: colors.borderSubtle,
+              },
+            ]}>
+            <View style={styles.actionSheetHandle} />
+            <RocketText style={styles.actionSheetTitle} variant="sectionTitle">
+              @{profile.username}
+            </RocketText>
+
+            <View style={styles.actionSheetButtons}>
+              {relationship === 'friends' ? (
+                <RocketPressable
+                  accessibilityHint="Remove user from friends"
+                  accessibilityLabel="Remove friend"
+                  accessibilityRole="button"
+                  disabled={unfriending || blocking || submittingReport}
+                  onPress={handleConfirmUnfriend}
+                  style={styles.sheetOption}>
+                  <Text style={styles.sheetOptionGlyph}>✕</Text>
+                  <RocketText color="error" style={styles.sheetOptionText} variant="bodyMedium">
+                    {unfriending ? 'Removing friend...' : 'Remove friend'}
+                  </RocketText>
+                </RocketPressable>
+              ) : null}
+
+              {relationship === 'blocked' ? (
+                <RocketPressable
+                  accessibilityHint="Unblock this user"
+                  accessibilityLabel="Unblock user"
+                  accessibilityRole="button"
                   disabled={unblocking || submittingReport}
                   onPress={handleConfirmUnblock}
-                  style={[page.unblockButton, (unblocking || submittingReport) && page.actionButtonDisabled]}
-                >
-                  <Text style={page.unblockButtonText}>{unblocking ? 'Unblocking...' : 'Unblock user'}</Text>
-                </Pressable>
-                <Pressable
-                  disabled={unblocking || submittingReport}
-                  onPress={handleOpenReportModal}
-                  style={[page.reportButton, (unblocking || submittingReport) && page.actionButtonDisabled]}
-                >
-                  <Text style={page.reportButtonText}>Report</Text>
-                </Pressable>
-              </View>
-            ) : (
-              <View style={page.buttonRow}>
-                {relationship === 'friends' ? (
-                  <Pressable
-                    disabled={unfriending || blocking || submittingReport}
-                    onPress={handleConfirmUnfriend}
-                    style={[page.unfriendButton, (unfriending || blocking || submittingReport) && page.actionButtonDisabled]}
-                  >
-                    <Text style={page.unfriendButtonText}>{unfriending ? 'Removing...' : 'Remove friend'}</Text>
-                  </Pressable>
-                ) : null}
-                <Pressable
+                  style={styles.sheetOption}>
+                  <Text style={styles.sheetOptionGlyph}>✓</Text>
+                  <RocketText style={styles.sheetOptionText} variant="bodyMedium">
+                    {unblocking ? 'Unblocking...' : 'Unblock user'}
+                  </RocketText>
+                </RocketPressable>
+              ) : (
+                <RocketPressable
+                  accessibilityHint="Block this user"
+                  accessibilityLabel="Block user"
+                  accessibilityRole="button"
                   disabled={blocking || unfriending || submittingReport}
                   onPress={handleConfirmBlock}
-                  style={[page.blockButton, (blocking || unfriending || submittingReport) && page.actionButtonDisabled]}
-                >
-                  <Text style={page.blockButtonText}>{blocking ? 'Blocking...' : 'Block'}</Text>
-                </Pressable>
-                <Pressable
-                  disabled={blocking || unfriending || submittingReport}
-                  onPress={handleOpenReportModal}
-                  style={[page.reportButton, (blocking || unfriending || submittingReport) && page.actionButtonDisabled]}
-                >
-                  <Text style={page.reportButtonText}>Report</Text>
-                </Pressable>
-              </View>
-            )}
-          </View>
-        ) : null}
-        {actionError ? <Text style={page.actionError}>{actionError}</Text> : null}
-      </View>
-      {relationship === 'blocked' ? (
-        <Card style={page.emptyPosts}><Text style={page.emptyPostsText}>You have blocked this user.</Text></Card>
-      ) : postsLoading ? (
-        <View style={page.postsState}>
-          <ActivityIndicator color={colors.accent} size="small" />
-          <Text style={page.postsStateText}>Loading posts...</Text>
-        </View>
-      ) : posts.length === 0 ? (
-        <Card style={page.emptyPosts}><Text style={page.emptyPostsText}>No posts yet.</Text></Card>
-      ) : (
-        posts.map((post) => <PostCard key={post.postId} post={post} />)
-      )}
+                  style={styles.sheetOption}>
+                  <Text style={styles.sheetOptionGlyph}>🚫</Text>
+                  <RocketText color="error" style={styles.sheetOptionText} variant="bodyMedium">
+                    {blocking ? 'Blocking...' : 'Block user'}
+                  </RocketText>
+                </RocketPressable>
+              )}
 
+              <RocketPressable
+                accessibilityHint="Report this user"
+                accessibilityLabel="Report user"
+                accessibilityRole="button"
+                disabled={submittingReport || blocking || unfriending}
+                onPress={handleOpenReportModal}
+                style={styles.sheetOption}>
+                <Text style={styles.sheetOptionGlyph}>🚩</Text>
+                <RocketText color="secondary" style={styles.sheetOptionText} variant="bodyMedium">
+                  Report user
+                </RocketText>
+              </RocketPressable>
+
+              <RocketButton
+                label="Cancel"
+                onPress={() => setShowActionSheet(false)}
+                size="md"
+                style={styles.sheetCancelButton}
+                variant="ghost"
+              />
+            </View>
+          </View>
+        </Pressable>
+      </Modal>
+
+      {/* Report Modal */}
       <Modal
         animationType="fade"
         onRequestClose={handleCloseReportModal}
         transparent
-        visible={showReportModal}
-      >
+        visible={showReportModal}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={page.modalOverlay}
-        >
-          <View style={page.modalCard}>
-            <Text style={page.modalTitle}>Report User</Text>
-            <Text style={page.modalSubtitle}>
+          style={styles.modalOverlay}>
+          <View
+            style={[
+              styles.reportCard,
+              {
+                backgroundColor: colors.surfaceElevated,
+                borderColor: colors.border,
+              },
+            ]}>
+            <RocketText style={styles.reportModalTitle} variant="sectionTitle">
+              Report User
+            </RocketText>
+            <RocketText
+              color="secondary"
+              style={styles.reportModalSubtitle}
+              variant="bodySecondary">
               Help us understand why you are reporting @{profile.username}.
-            </Text>
+            </RocketText>
 
             <ScrollView
-              contentContainerStyle={page.modalScrollContent}
+              contentContainerStyle={styles.reportScrollContent}
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
-              style={page.modalScrollView}
-            >
-              <Text style={page.modalSectionLabel}>Reason</Text>
-              <View style={page.reasonsList}>
+              style={styles.reportScrollView}>
+              <RocketText
+                color="secondary"
+                style={styles.reportSectionLabel}
+                variant="captionBold">
+                Reason
+              </RocketText>
+              <View style={styles.reasonsList}>
                 {REPORT_REASONS.map((r) => {
                   const isSelected = reportReason === r;
                   return (
                     <Pressable
+                      accessibilityRole="radio"
+                      accessibilityState={{ selected: isSelected }}
                       key={r}
                       onPress={() => setReportReason(r)}
-                      style={[page.reasonOption, isSelected && page.reasonOptionSelected]}
-                    >
-                      <View style={[page.radioCircle, isSelected && page.radioCircleSelected]}>
-                        {isSelected ? <View style={page.radioInnerDot} /> : null}
+                      style={[
+                        styles.reasonOption,
+                        {
+                          backgroundColor: isSelected
+                            ? colors.primaryAccentSubtle
+                            : colors.surface,
+                          borderColor: isSelected
+                            ? colors.primaryAccent
+                            : colors.borderSubtle,
+                        },
+                      ]}>
+                      <View
+                        style={[
+                          styles.radioCircle,
+                          {
+                            borderColor: isSelected
+                              ? colors.primaryAccent
+                              : colors.secondaryText,
+                          },
+                        ]}>
+                        {isSelected ? (
+                          <View
+                            style={[
+                              styles.radioInnerDot,
+                              { backgroundColor: colors.primaryAccent },
+                            ]}
+                          />
+                        ) : null}
                       </View>
-                      <Text style={[page.reasonText, isSelected && page.reasonTextSelected]}>
+                      <RocketText
+                        color={isSelected ? 'primary' : 'secondary'}
+                        style={styles.reasonText}
+                        variant="body">
                         {REPORT_REASON_LABELS[r]}
-                      </Text>
+                      </RocketText>
                     </Pressable>
                   );
                 })}
               </View>
 
-              <View style={page.detailsHeader}>
-                <Text style={page.modalSectionLabel}>Details (Optional)</Text>
-                <Text style={page.charCounter}>{reportDetails.length}/500</Text>
+              <View style={styles.detailsHeader}>
+                <RocketText
+                  color="secondary"
+                  style={styles.reportSectionLabel}
+                  variant="captionBold">
+                  Details (Optional)
+                </RocketText>
+                <RocketText color="muted" variant="caption">
+                  {reportDetails.length}/500
+                </RocketText>
               </View>
               <TextInput
                 maxLength={500}
@@ -397,91 +861,262 @@ export default function OtherUserProfileScreen() {
                 numberOfLines={3}
                 onChangeText={setReportDetails}
                 placeholder="Provide additional details..."
-                placeholderTextColor={colors.textSecondary}
-                style={page.detailsInput}
+                placeholderTextColor={colors.mutedText}
+                style={[
+                  styles.detailsInput,
+                  {
+                    backgroundColor: colors.surface,
+                    borderColor: colors.borderSubtle,
+                    color: colors.primaryText,
+                  },
+                ]}
                 textAlignVertical="top"
                 value={reportDetails}
               />
 
-              {reportError ? <Text style={page.modalError}>{reportError}</Text> : null}
+              {reportError ? (
+                <RocketText color="error" style={styles.reportError} variant="caption">
+                  {reportError}
+                </RocketText>
+              ) : null}
             </ScrollView>
 
-            <View style={page.modalActions}>
-              <Pressable
+            <View
+              style={[
+                styles.reportActions,
+                { borderTopColor: colors.borderSubtle },
+              ]}>
+              <RocketButton
                 disabled={submittingReport}
+                label="Cancel"
                 onPress={handleCloseReportModal}
-                style={[page.modalCancelButton, submittingReport && page.actionButtonDisabled]}
-              >
-                <Text style={page.modalCancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable
+                size="md"
+                style={styles.modalHalfButton}
+                variant="ghost"
+              />
+              <RocketButton
                 disabled={submittingReport}
-                onPress={handleSubmitReport}
-                style={[page.modalSubmitButton, submittingReport && page.actionButtonDisabled]}
-              >
-                {submittingReport ? (
-                  <ActivityIndicator color="#FFF" size="small" />
-                ) : (
-                  <Text style={page.modalSubmitText}>Submit Report</Text>
-                )}
-              </Pressable>
+                label="Submit report"
+                loading={submittingReport}
+                onPress={() => void handleSubmitReport()}
+                size="md"
+                style={styles.modalHalfButton}
+                variant="primary"
+              />
             </View>
           </View>
         </KeyboardAvoidingView>
       </Modal>
-    </Screen>
+    </RocketScreen>
   );
 }
 
-const page = StyleSheet.create({
-  state: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28 },
-  stateTitle: { color: colors.text, fontSize: 20, fontWeight: '800', textAlign: 'center' },
-  stateText: { color: colors.textSecondary, textAlign: 'center', marginTop: 8 },
-  profile: { alignItems: 'center', marginTop: 28 },
-  name: { color: colors.text, fontSize: 21, fontWeight: '900', marginTop: 13 },
-  handle: { color: colors.textSecondary, fontSize: 13, marginTop: 4 },
-  bio: { color: colors.textSecondary, fontSize: 13, textAlign: 'center', maxWidth: 250, lineHeight: 20, marginTop: 13 },
-  stats: { flexDirection: 'row', gap: 42, marginTop: 25, marginBottom: 29 },
-  statNumber: { color: colors.text, textAlign: 'center', fontSize: 18, fontWeight: '900' },
-  statLabel: { color: colors.textSecondary, textAlign: 'center', fontSize: 11, marginTop: 5 },
-  actions: { marginTop: 16, marginBottom: 12 },
-  buttonRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
-  unfriendButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
-  unfriendButtonText: { color: colors.accent, fontSize: 13, fontWeight: '800', textAlign: 'center' },
-  blockButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
-  blockButtonText: { color: colors.accent, fontSize: 13, fontWeight: '800', textAlign: 'center' },
-  unblockButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
-  unblockButtonText: { color: colors.text, fontSize: 13, fontWeight: '800', textAlign: 'center' },
-  reportButton: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 9, paddingHorizontal: 16 },
-  reportButtonText: { color: colors.textSecondary, fontSize: 13, fontWeight: '800', textAlign: 'center' },
-  actionButtonDisabled: { opacity: 0.5 },
-  actionError: { color: colors.accent, fontSize: 13, textAlign: 'center', marginTop: 8, paddingHorizontal: 20 },
-  postsState: { alignItems: 'center', paddingVertical: 18 },
-  postsStateText: { color: colors.textSecondary, marginTop: 8, fontSize: 12 },
-  emptyPosts: { alignItems: 'center', padding: 22, marginBottom: 18 },
-  emptyPostsText: { color: colors.text, fontSize: 15, fontWeight: '700' },
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.75)', justifyContent: 'center', alignItems: 'center', padding: 20 },
-  modalCard: { width: '100%', maxWidth: 420, maxHeight: '85%', backgroundColor: colors.backgroundElement, borderRadius: 20, borderWidth: 1, borderColor: colors.border, padding: 20 },
-  modalTitle: { color: colors.text, fontSize: 18, fontWeight: '800', textAlign: 'center' },
-  modalSubtitle: { color: colors.textSecondary, fontSize: 13, textAlign: 'center', marginTop: 4, marginBottom: 16 },
-  modalScrollView: { maxHeight: 340 },
-  modalScrollContent: { paddingBottom: 8 },
-  modalSectionLabel: { color: colors.textSecondary, fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.7, marginBottom: 8 },
-  reasonsList: { gap: 8, marginBottom: 16 },
-  reasonOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border },
-  reasonOptionSelected: { borderColor: colors.accent, backgroundColor: colors.backgroundSelected },
-  radioCircle: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.textSecondary, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
-  radioCircleSelected: { borderColor: colors.accent },
-  radioInnerDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
-  reasonText: { color: colors.textSecondary, fontSize: 14, fontWeight: '600', flex: 1 },
-  reasonTextSelected: { color: colors.text, fontWeight: '700' },
-  detailsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  charCounter: { color: colors.textSecondary, fontSize: 12 },
-  detailsInput: { height: 80, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background, color: colors.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14 },
-  modalError: { color: colors.accent, fontSize: 12, marginTop: 10, textAlign: 'center' },
-  modalActions: { flexDirection: 'row', gap: 12, marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.border },
-  modalCancelButton: { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: colors.backgroundSelected, alignItems: 'center', justifyContent: 'center' },
-  modalCancelText: { color: colors.text, fontSize: 14, fontWeight: '700' },
-  modalSubmitButton: { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
-  modalSubmitText: { color: '#FFF', fontSize: 14, fontWeight: '800' },
+const styles = StyleSheet.create({
+  screenContent: {
+    paddingHorizontal: 0,
+    flex: 1,
+  },
+  listContent: {
+    paddingHorizontal: SpacingScale.xl,
+    paddingBottom: SpacingScale.huge,
+  },
+  headerContainer: {
+    paddingTop: SpacingScale.sm,
+    marginBottom: SpacingScale.lg,
+  },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: SpacingScale.md,
+  },
+  backGlyph: {
+    fontSize: 28,
+    fontWeight: '300',
+  },
+  headerHandle: {
+    fontWeight: '700',
+    maxWidth: 200,
+    textAlign: 'center',
+  },
+  optionsGlyph: {
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SpacingScale.sm,
+    width: '100%',
+  },
+  primaryActionButton: {
+    flex: 1,
+  },
+  buttonIcon: {
+    fontSize: 16,
+  },
+  actionError: {
+    textAlign: 'center',
+    marginTop: SpacingScale.sm,
+    paddingHorizontal: SpacingScale.lg,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: SpacingScale.xl,
+    marginBottom: SpacingScale.sm,
+    paddingHorizontal: 2,
+  },
+  sectionTitle: {
+    letterSpacing: -0.3,
+  },
+  centerContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: SpacingScale.xl,
+  },
+  loadingText: {
+    marginTop: SpacingScale.md,
+  },
+  stateContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: SpacingScale.epic,
+  },
+  stateText: {
+    marginTop: SpacingScale.sm,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: SpacingScale.xl,
+  },
+  actionSheetCard: {
+    width: '100%',
+    maxWidth: 400,
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    padding: SpacingScale.xl,
+  },
+  actionSheetHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#334155',
+    alignSelf: 'center',
+    marginBottom: SpacingScale.md,
+  },
+  actionSheetTitle: {
+    textAlign: 'center',
+    marginBottom: SpacingScale.lg,
+  },
+  actionSheetButtons: {
+    gap: SpacingScale.sm,
+  },
+  sheetOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SpacingScale.md,
+    paddingVertical: SpacingScale.md,
+    paddingHorizontal: SpacingScale.md,
+    borderRadius: Radius.md,
+  },
+  sheetOptionGlyph: {
+    fontSize: 18,
+    width: 24,
+    textAlign: 'center',
+  },
+  sheetOptionText: {
+    fontWeight: '700',
+  },
+  sheetCancelButton: {
+    marginTop: SpacingScale.sm,
+  },
+  reportCard: {
+    width: '100%',
+    maxWidth: 420,
+    maxHeight: '85%',
+    borderRadius: Radius.xl,
+    borderWidth: 1,
+    padding: SpacingScale.xl,
+  },
+  reportModalTitle: {
+    textAlign: 'center',
+  },
+  reportModalSubtitle: {
+    textAlign: 'center',
+    marginTop: 4,
+    marginBottom: SpacingScale.lg,
+  },
+  reportScrollView: {
+    maxHeight: 340,
+  },
+  reportScrollContent: {
+    paddingBottom: SpacingScale.sm,
+  },
+  reportSectionLabel: {
+    marginBottom: SpacingScale.xs,
+  },
+  reasonsList: {
+    gap: SpacingScale.xs,
+    marginBottom: SpacingScale.lg,
+  },
+  reasonOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SpacingScale.md - 2,
+    paddingHorizontal: SpacingScale.md,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  radioCircle: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: SpacingScale.md,
+  },
+  radioInnerDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  reasonText: {
+    flex: 1,
+    fontWeight: '600',
+  },
+  detailsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SpacingScale.xs,
+  },
+  detailsInput: {
+    height: 84,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    paddingHorizontal: SpacingScale.md,
+    paddingVertical: SpacingScale.sm,
+    fontSize: 14,
+  },
+  reportError: {
+    marginTop: SpacingScale.sm,
+    textAlign: 'center',
+  },
+  reportActions: {
+    flexDirection: 'row',
+    gap: SpacingScale.md,
+    marginTop: SpacingScale.lg,
+    paddingTop: SpacingScale.md,
+    borderTopWidth: 1,
+  },
+  modalHalfButton: {
+    flex: 1,
+  },
 });

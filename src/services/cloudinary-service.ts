@@ -51,6 +51,46 @@ export async function uploadChatVideo(uri: string | null | undefined, mimeType?:
   return payload.secure_url;
 }
 
+export async function uploadVoiceMessage(uri: string | null | undefined): Promise<string> {
+  if (!uri) {
+    throw new Error('The recorded voice message could not be read.');
+  }
+
+  let audioFile: File;
+  try {
+    audioFile = new File(uri);
+    if (!audioFile.exists || audioFile.size <= 0) {
+      throw new Error('The recorded audio file is missing or empty.');
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'The recorded audio file is invalid.';
+    throw new Error(`Voice message upload failed: ${message}`);
+  }
+
+  const extension = audioFile.extension.toLowerCase();
+  if (extension !== '.m4a' && extension !== '.webm') {
+    throw new Error(`Voice message upload failed: unsupported audio format (${extension || 'unknown'}).`);
+  }
+
+  const formData = new FormData();
+  formData.append('file', audioFile, `voice_message${extension}`);
+  formData.append('upload_preset', VIDEO_UPLOAD_PRESET);
+
+  let response: Response;
+  try {
+    response = await expoFetch(VIDEO_UPLOAD_ENDPOINT, { method: 'POST', body: formData });
+  } catch (error) {
+    const message = error instanceof Error && error.message ? error.message : 'Network request failed';
+    throw new Error(`Voice message upload failed: ${message}`);
+  }
+
+  const payload = await response.json().catch(() => null) as { secure_url?: string; error?: { message?: string } } | null;
+  if (!response.ok || !payload?.secure_url || !/^https:\/\//.test(payload.secure_url)) {
+    throw new Error(payload?.error?.message || `Voice message upload failed (HTTP ${response.status}).`);
+  }
+  return payload.secure_url;
+}
+
 export async function uploadChatFile(uri: string | null | undefined, fileName?: string | null): Promise<string> {
   if (!uri) {
     throw new Error('The selected file could not be read. Please choose it again.');

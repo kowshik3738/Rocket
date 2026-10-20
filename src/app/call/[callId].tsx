@@ -14,6 +14,7 @@ import {
   getCallState,
   subscribeToCallState,
   toggleMute,
+  toggleSpeakerphone,
   watchCall,
 } from '@/services/call-service';
 import { getProfileColor, getProfileInitials, getUserProfile, UserProfile } from '@/services/user-service';
@@ -25,6 +26,7 @@ function statusLabel(state: CallState) {
   if (state.call?.phase === 'ended') return 'Call ended';
   if (state.status === 'connected') return 'Connected';
   if (state.status === 'connecting') return 'Connecting…';
+  if (state.status === 'calling') return 'Calling…';
   if (state.status === 'ringing') return state.role === 'callee' ? 'Incoming voice call' : 'Ringing…';
   return state.call?.phase === 'accepted' ? 'Connected' : 'Call ended';
 }
@@ -82,7 +84,7 @@ export default function CallScreen() {
     <View style={styles.page}>
       <View style={styles.content}>
         <Text style={styles.kicker}>VOICE CALL</Text>
-        <Avatar size={96} user={avatar} />
+        <Avatar size={96} source={otherUser?.photoUrl} user={avatar} />
         <Text style={styles.name}>{displayName}</Text>
         {otherUser ? <Text style={styles.handle}>@{otherUser.username}</Text> : null}
         {!call && !actionError ? <ActivityIndicator color={colors.accent} style={styles.loading} /> : null}
@@ -97,12 +99,13 @@ export default function CallScreen() {
             <Pressable disabled={acting} onPress={() => runAction(async () => { await declineIncomingCall(); router.back(); })} style={[styles.button, styles.decline, acting && styles.disabled]}><Text style={styles.declineText}>Decline</Text></Pressable>
           </>
         ) : null}
-        {callState.role === 'caller' && callState.status === 'ringing' ? (
+        {callState.role === 'caller' && (callState.status === 'calling' || callState.status === 'ringing') ? (
           <Pressable disabled={acting} onPress={() => runAction(async () => { await cancelOutgoingCall(); router.back(); })} style={[styles.button, styles.decline, acting && styles.disabled]}><Text style={styles.declineText}>Cancel</Text></Pressable>
         ) : null}
         {accepted ? (
           <>
             <Pressable disabled={acting} onPress={() => runAction(() => { toggleMute(); })} style={[styles.button, styles.mute, acting && styles.disabled]}><Text style={styles.muteText}>{callState.muted ? 'Unmute' : 'Mute'}</Text></Pressable>
+            <Pressable disabled={acting} onPress={() => runAction(async () => { await toggleSpeakerphone(); })} style={[styles.button, styles.mute, callState.speakerphoneOn && styles.speakerOn, acting && styles.disabled]}><Text style={[styles.muteText, callState.speakerphoneOn && styles.speakerOnText]}>{callState.speakerphoneOn ? 'Speaker on' : 'Speaker off'}</Text></Pressable>
             <Pressable disabled={acting} onPress={() => runAction(endCall)} style={[styles.button, styles.decline, acting && styles.disabled]}><Text style={styles.declineText}>End call</Text></Pressable>
           </>
         ) : null}
@@ -129,5 +132,7 @@ const styles = StyleSheet.create({
   declineText: { color: '#FFF', fontSize: 16, fontWeight: '900' },
   mute: { backgroundColor: colors.backgroundElement, borderWidth: 1, borderColor: colors.border },
   muteText: { color: colors.text, fontSize: 16, fontWeight: '800' },
+  speakerOn: { backgroundColor: colors.accent, borderColor: colors.accent },
+  speakerOnText: { color: '#FFF' },
   disabled: { opacity: 0.5 },
 });

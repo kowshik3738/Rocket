@@ -1,22 +1,36 @@
 import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import {
+  FlatList,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
-import { Avatar, Card, colors, Screen, SectionTitle } from '@/components/rocket-ui';
 import { useAuth } from '@/providers/auth-provider';
-import { getSearchUsers, RelationshipStatus, SearchUser, sendFriendRequest } from '@/services/social-service';
+import {
+  getSearchUsers,
+  SearchUser,
+  sendFriendRequest,
+} from '@/services/social-service';
 import { getProfileColor, getProfileInitials } from '@/services/user-service';
-
-function relationshipLabel(status: RelationshipStatus) {
-  if (status === 'friends') return 'Friends';
-  if (status === 'sent') return 'Request sent';
-  if (status === 'incoming') return 'Incoming request';
-  if (status === 'blocked') return 'Blocked';
-  return 'Add friend';
-}
+import {
+  RocketButton,
+  RocketEmptyState,
+  RocketInput,
+  RocketLoadingIndicator,
+  RocketScreen,
+  RocketText,
+  RocketUserRow,
+  useRocketTheme,
+} from '@/design-system';
+import { SpacingScale } from '@/design-system/tokens/spacing';
 
 export default function SearchScreen() {
   const { user } = useAuth();
+  const { colors } = useRocketTheme();
+
   const [term, setTerm] = useState('');
   const [results, setResults] = useState<SearchUser[]>([]);
   const [loading, setLoading] = useState(false);
@@ -34,13 +48,18 @@ export default function SearchScreen() {
     let active = true;
     setLoading(true);
     setError('');
+
     const timer = setTimeout(() => {
       void getSearchUsers(term, user.uid)
         .then((nextResults) => {
           if (active) setResults(nextResults);
         })
         .catch(() => {
-          if (active) setError('We could not search Rocket right now. Check your connection and try again.');
+          if (active) {
+            setError(
+              'We could not search Rocket right now. Check your connection and try again.'
+            );
+          }
         })
         .finally(() => {
           if (active) setLoading(false);
@@ -57,17 +76,272 @@ export default function SearchScreen() {
     if (!user || target.relationship !== 'add') return;
     setActionId(target.uid);
     setError('');
+
     try {
       await sendFriendRequest(user.uid, target.uid);
-      setResults((current) => current.map((result) => result.uid === target.uid ? { ...result, relationship: 'sent' } : result));
+      setResults((current) =>
+        current.map((result) =>
+          result.uid === target.uid ? { ...result, relationship: 'sent' } : result
+        )
+      );
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Could not send friend request.');
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : 'Could not send friend request.'
+      );
     } finally {
       setActionId('');
     }
   }
 
-  return <Screen><Text style={page.title}>Find your people</Text><Text style={page.subtitle}>Search Rocket by username.</Text><View style={page.search}><Text style={page.searchIcon}>⌕</Text><TextInput autoCapitalize="none" autoCorrect={false} onChangeText={setTerm} placeholder="Search by username" placeholderTextColor={colors.textSecondary} style={page.input} value={term} /></View><SectionTitle title="Results" />{loading ? <View style={page.state}><ActivityIndicator color={colors.accent} /><Text style={page.stateText}>Searching Rocket...</Text></View> : error ? <View style={page.state}><Text style={page.error}>{error}</Text></View> : !term.trim() ? <View style={page.state}><Text style={page.stateText}>Search for a username to find people.</Text></View> : results.length === 0 ? <View style={page.state}><Text style={page.emptyTitle}>No people found</Text><Text style={page.stateText}>Try another username.</Text></View> : results.map((result) => { const avatar = { initials: getProfileInitials(result.displayName), color: getProfileColor(result.uid) }; const isAddable = result.relationship === 'add'; const destinationUid = String(result.uid || ''); return <Pressable key={result.uid} onPress={() => { if (!destinationUid) return; router.push({ pathname: '/user/[uid]', params: { uid: destinationUid } }); }}><Card style={page.person}><Avatar user={avatar} size={48} /><View style={page.info}><Text style={page.name}>{result.displayName}</Text><Text style={page.handle}>@{result.username}</Text></View><Pressable disabled={!isAddable || actionId === result.uid} onPress={(event) => { event.stopPropagation(); void handleSendRequest(result); }} style={[page.follow, !isAddable && page.inactive]}><Text style={page.followText}>{actionId === result.uid ? 'Sending...' : relationshipLabel(result.relationship)}</Text></Pressable></Card></Pressable>; })}</Screen>;
+  function handleNavigateToProfile(targetUid: string) {
+    router.push({
+      pathname: '/user/[uid]',
+      params: { uid: targetUid },
+    });
+  }
+
+  const renderRelationshipButton = (target: SearchUser) => {
+    switch (target.relationship) {
+      case 'friends':
+        return (
+          <RocketButton
+            disabled
+            label="Friends"
+            size="sm"
+            variant="ghost"
+          />
+        );
+      case 'sent':
+        return (
+          <RocketButton
+            disabled
+            label="Sent"
+            size="sm"
+            variant="secondary"
+          />
+        );
+      case 'incoming':
+        return (
+          <RocketButton
+            label="Respond"
+            onPress={() => router.push('/friends')}
+            size="sm"
+            variant="secondary"
+          />
+        );
+      case 'blocked':
+        return (
+          <RocketButton
+            disabled
+            label="Blocked"
+            size="sm"
+            variant="ghost"
+          />
+        );
+      case 'add':
+      default:
+        return (
+          <RocketButton
+            disabled={actionId !== ''}
+            label={actionId === target.uid ? 'Adding...' : 'Add'}
+            loading={actionId === target.uid}
+            onPress={() => void handleSendRequest(target)}
+            size="sm"
+            variant="primary"
+          />
+        );
+    }
+  };
+
+  return (
+    <RocketScreen
+      contentContainerStyle={styles.screenContent}
+      edges={['top']}
+      scroll={false}>
+      {/* Top Header */}
+      <View style={styles.header}>
+        <RocketText style={styles.title} variant="screenTitle">
+          Find people
+        </RocketText>
+        <RocketText color="secondary" style={styles.subtitle} variant="bodySecondary">
+          Search Rocket by username to connect.
+        </RocketText>
+
+        {/* Search Field */}
+        <View style={styles.searchWrap}>
+          <RocketInput
+            autoCapitalize="none"
+            autoCorrect={false}
+            containerStyle={styles.searchInputContainer}
+            iconLeft={
+              <Text style={[styles.searchIcon, { color: colors.secondaryText }]}>
+                ⌕
+              </Text>
+            }
+            iconRight={
+              term.length > 0 ? (
+                <Pressable
+                  accessibilityHint="Clear search term"
+                  accessibilityLabel="Clear search"
+                  accessibilityRole="button"
+                  hitSlop={8}
+                  onPress={() => setTerm('')}
+                  style={styles.clearButton}>
+                  <Text style={[styles.clearIcon, { color: colors.secondaryText }]}>
+                    ✕
+                  </Text>
+                </Pressable>
+              ) : null
+            }
+            onChangeText={setTerm}
+            placeholder="Search by username..."
+            placeholderTextColor={colors.mutedText}
+            returnKeyType="search"
+            value={term}
+          />
+        </View>
+      </View>
+
+      {/* Error Message */}
+      {error ? (
+        <View style={styles.errorContainer}>
+          <RocketText color="error" style={styles.errorText} variant="caption">
+            {error}
+          </RocketText>
+        </View>
+      ) : null}
+
+      {/* Main Results / State Area */}
+      {loading ? (
+        <View style={styles.centerContainer}>
+          <RocketLoadingIndicator size="normal" />
+          <RocketText color="secondary" style={styles.loadingText} variant="caption">
+            Searching Rocket...
+          </RocketText>
+        </View>
+      ) : !term.trim() ? (
+        <View style={styles.emptyPromptContainer}>
+          <RocketEmptyState
+            body="Type a username above to find friends and add them to your orbit."
+            title="Search for people"
+          />
+        </View>
+      ) : results.length === 0 ? (
+        <View style={styles.emptyPromptContainer}>
+          <RocketEmptyState
+            body={`We could not find anyone matching "@${term.trim()}". Try another username.`}
+            title="No people found"
+          />
+        </View>
+      ) : (
+        <FlatList
+          contentContainerStyle={styles.listContent}
+          data={results}
+          keyExtractor={(item) => item.uid}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={
+            <View style={styles.resultsHeader}>
+              <RocketText color="primary" variant="sectionTitle">
+                Results
+              </RocketText>
+              <RocketText color="secondary" variant="caption">
+                {results.length} {results.length === 1 ? 'user' : 'users'}
+              </RocketText>
+            </View>
+          }
+          renderItem={({ item }) => {
+            const avatar = {
+              initials: getProfileInitials(item.displayName),
+              color: getProfileColor(item.uid),
+            };
+
+            return (
+              <RocketUserRow
+                avatarUser={avatar}
+                avatarSource={item.photoUrl}
+                displayName={item.displayName}
+                id={item.uid}
+                onPress={() => handleNavigateToProfile(item.uid)}
+                trailingAction={renderRelationshipButton(item)}
+                username={item.username}
+              />
+            );
+          }}
+          showsVerticalScrollIndicator={false}
+        />
+      )}
+    </RocketScreen>
+  );
 }
 
-const page = StyleSheet.create({ title: { color: colors.text, fontSize: 28, fontWeight: '900', marginTop: 16 }, subtitle: { color: colors.textSecondary, marginTop: 7 }, search: { height: 54, borderRadius: 17, backgroundColor: colors.backgroundElement, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 15, marginTop: 26, marginBottom: 30 }, searchIcon: { color: colors.textSecondary, fontSize: 25, marginRight: 8 }, input: { flex: 1, color: colors.text, fontSize: 15 }, person: { padding: 13, flexDirection: 'row', alignItems: 'center', marginBottom: 10 }, info: { flex: 1, marginLeft: 11 }, name: { color: colors.text, fontSize: 14, fontWeight: '800' }, handle: { color: colors.textSecondary, fontSize: 11, marginTop: 4 }, follow: { borderRadius: 12, backgroundColor: colors.backgroundSelected, paddingVertical: 10, paddingHorizontal: 12 }, inactive: { opacity: 0.65 }, followText: { color: colors.accentSecondary, fontSize: 12, fontWeight: '800' }, state: { alignItems: 'center', paddingVertical: 35, paddingHorizontal: 24 }, stateText: { color: colors.textSecondary, fontSize: 13, textAlign: 'center', marginTop: 9 }, emptyTitle: { color: colors.text, fontSize: 16, fontWeight: '800' }, error: { color: colors.accent, textAlign: 'center', fontSize: 13, lineHeight: 19 } });
+const styles = StyleSheet.create({
+  screenContent: {
+    paddingHorizontal: 0,
+    flex: 1,
+  },
+  header: {
+    paddingHorizontal: SpacingScale.xl,
+    paddingTop: SpacingScale.sm,
+    paddingBottom: SpacingScale.sm,
+  },
+  title: {
+    fontSize: 26,
+    letterSpacing: -0.6,
+  },
+  subtitle: {
+    marginTop: 4,
+    marginBottom: SpacingScale.lg,
+  },
+  searchWrap: {
+    marginBottom: SpacingScale.sm,
+  },
+  searchInputContainer: {
+    marginBottom: 0,
+  },
+  searchIcon: {
+    fontSize: 20,
+    fontWeight: '700',
+    marginRight: 4,
+  },
+  clearButton: {
+    padding: 4,
+  },
+  clearIcon: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  errorContainer: {
+    paddingHorizontal: SpacingScale.xl,
+    marginBottom: SpacingScale.sm,
+  },
+  errorText: {
+    textAlign: 'center',
+  },
+  centerContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: SpacingScale.xl,
+  },
+  loadingText: {
+    marginTop: SpacingScale.md,
+  },
+  emptyPromptContainer: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  listContent: {
+    paddingHorizontal: SpacingScale.xl,
+    paddingBottom: SpacingScale.huge,
+  },
+  resultsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: SpacingScale.sm,
+    marginBottom: SpacingScale.md,
+    paddingHorizontal: 2,
+  },
+});

@@ -1,32 +1,345 @@
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { router } from 'expo-router';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  FlatList,
+  RefreshControl,
+  StyleSheet,
+  View,
+} from 'react-native';
 
-import { PostCard } from '@/components/post-card';
-import { Brand, Card, Screen, SectionTitle, colors } from '@/components/rocket-ui';
 import { useAuth } from '@/providers/auth-provider';
 import { getFriends } from '@/services/social-service';
 import { Post, subscribeToFeed } from '@/services/posts-service';
+import { RocketStoryRail } from '@/components/RocketStoryRail';
+import { getProfileColor, getProfileInitials } from '@/services/user-service';
+import {
+  RocketAvatar,
+  RocketBrand,
+  RocketButton,
+  RocketEmptyState,
+  RocketIconButton,
+  RocketLoadingIndicator,
+  RocketPostCard,
+  RocketPressable,
+  RocketScreen,
+  RocketText,
+  useRocketTheme,
+} from '@/design-system';
+import { SpacingScale } from '@/design-system/tokens/spacing';
 
 export default function FeedScreen() {
   const { profile, user } = useAuth();
+  const { colors } = useRocketTheme();
+
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    if (!user) return;
-    let unsubscribePosts: () => void = () => undefined;
-    setLoading(true);
+  // Date and dynamic greeting
+  const todayFormatted = useMemo(() => {
+    return new Date()
+      .toLocaleDateString('en-US', {
+        weekday: 'long',
+        month: 'long',
+        day: 'numeric',
+      })
+      .toUpperCase();
+  }, []);
+
+  const greetingTitle = useMemo(() => {
+    const hour = new Date().getHours();
+    const greeting =
+      hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+    return `${greeting}, ${profile?.displayName ?? 'Traveler'}`;
+  }, [profile?.displayName]);
+
+  const loadFeed = (showRefreshIndicator = false) => {
+    if (!user) return () => undefined;
+    if (showRefreshIndicator) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     setError('');
-    void getFriends(user.uid).then((friends) => {
-      unsubscribePosts = subscribeToFeed(user.uid, [user.uid, ...friends.map((friend) => friend.uid)], setPosts, (feedError) => { setError(feedError.message || 'We could not load your feed.'); setLoading(false); });
-      setLoading(false);
-    }).catch(() => { setError('We could not load your orbit. Check your connection and try again.'); setLoading(false); });
+
+    let unsubscribePosts: () => void = () => undefined;
+
+    void getFriends(user.uid)
+      .then((friends) => {
+        unsubscribePosts = subscribeToFeed(
+          user.uid,
+          [user.uid, ...friends.map((friend) => friend.uid)],
+          (nextPosts) => {
+            setPosts(nextPosts);
+            setLoading(false);
+            setRefreshing(false);
+          },
+          (feedError) => {
+            setError(feedError.message || 'We could not load your feed.');
+            setLoading(false);
+            setRefreshing(false);
+          }
+        );
+        setLoading(false);
+        setRefreshing(false);
+      })
+      .catch(() => {
+        setError('We could not load your orbit. Check your connection and try again.');
+        setLoading(false);
+        setRefreshing(false);
+      });
+
     return () => unsubscribePosts();
+  };
+
+  useEffect(() => {
+    const unsub = loadFeed(false);
+    return () => unsub();
   }, [user]);
 
-  if (!profile) return <Screen scroll={false}><View style={page.missing}><Text style={page.missingTitle}>Profile setup required</Text><Text style={page.missingBody}>Your Rocket profile could not be found.</Text></View></Screen>;
-  return <Screen><View style={page.header}><Brand compact /><Pressable style={page.bell}><Text style={page.bellText}>○</Text><View style={page.dot} /></Pressable></View><View style={page.greeting}><Text style={page.eyebrow}>TUESDAY, SEPTEMBER 15</Text><Text style={page.title}>Good morning, {profile.displayName}</Text><Text style={page.subtitle}>Here is what is happening in your orbit.</Text></View><SectionTitle title="Latest from your people" />{loading ? <View style={page.state}><ActivityIndicator color={colors.accent} /><Text style={page.stateText}>Loading your feed...</Text></View> : error ? <View style={page.state}><Text style={page.error}>{error}</Text></View> : posts.length === 0 ? <Card style={page.empty}><Text style={page.emptyTitle}>No posts yet.</Text><Text style={page.emptyBody}>Share something with your orbit.</Text></Card> : posts.map((post) => <PostCard key={post.postId} post={post} />)}</Screen>;
+  const handleRefresh = () => {
+    loadFeed(true);
+  };
+
+  if (!profile) {
+    return (
+      <RocketScreen scroll={false}>
+        <RocketEmptyState
+          action={
+            <RocketButton
+              label="Sign in again"
+              onPress={() => router.push('/sign-in')}
+              size="md"
+              variant="primary"
+            />
+          }
+          body="Your Rocket profile could not be found. Please check your account setup."
+          title="Profile setup required"
+        />
+      </RocketScreen>
+    );
+  }
+
+  const userAvatar = {
+    initials: getProfileInitials(profile.displayName),
+    color: user ? getProfileColor(user.uid) : colors.primaryAccent,
+  };
+
+  return (
+    <RocketScreen
+      contentContainerStyle={styles.screenContent}
+      edges={['top']}
+      scroll={false}>
+      <FlatList
+        data={posts}
+        keyExtractor={(item) => item.postId}
+        renderItem={({ item }) => <RocketPostCard post={item} />}
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            colors={[colors.primaryAccent]}
+            onRefresh={handleRefresh}
+            refreshing={refreshing}
+            tintColor={colors.primaryAccent}
+          />
+        }
+        ListHeaderComponent={
+          <View style={styles.headerContainer}>
+            {/* Top Brand & Actions Bar */}
+            <View style={styles.topBar}>
+              <RocketBrand compact showSpark />
+              <View style={styles.headerActions}>
+                <RocketIconButton
+                  accessibilityHint="Create a new post"
+                  accessibilityLabel="Create post"
+                  glyph="＋"
+                  glyphStyle={styles.createGlyph}
+                  onPress={() => router.push('/create-post')}
+                  size="sm"
+                  variant="filled"
+                />
+                <RocketPressable
+                  accessibilityHint="View your profile"
+                  accessibilityLabel={`Profile, ${profile.displayName}`}
+                  accessibilityRole="button"
+                  hitSlop={6}
+                  onPress={() => router.push('/(tabs)/profile')}
+                  style={styles.avatarPressable}>
+                  <RocketAvatar
+                    hasOrbit={false}
+                    size={36}
+                    source={profile.photoUrl}
+                    user={userAvatar}
+                  />
+                </RocketPressable>
+              </View>
+            </View>
+
+            {/* Greeting & Date */}
+            <View style={styles.greetingSection}>
+              <RocketText
+                color="accent"
+                style={styles.dateEyebrow}
+                variant="captionBold">
+                {todayFormatted}
+              </RocketText>
+              <RocketText
+                color="primary"
+                style={styles.greetingTitle}
+                variant="screenTitle">
+                {greetingTitle}
+              </RocketText>
+              <RocketText
+                color="secondary"
+                style={styles.greetingSubtitle}
+                variant="bodySecondary">
+                Here is what is happening in your orbit.
+              </RocketText>
+            </View>
+
+            {/* Future Stories Slot */}
+            <RocketStoryRail />
+
+            {/* Section Header */}
+            <View style={styles.sectionHeaderRow}>
+              <RocketText
+                color="primary"
+                style={styles.sectionTitle}
+                variant="sectionTitle">
+                Latest from your orbit
+              </RocketText>
+            </View>
+          </View>
+        }
+        ListEmptyComponent={
+          loading ? (
+            <View style={styles.stateContainer}>
+              <RocketLoadingIndicator size="normal" />
+              <RocketText color="secondary" style={styles.stateText} variant="caption">
+                Loading your feed...
+              </RocketText>
+            </View>
+          ) : error ? (
+            <View style={styles.stateContainer}>
+              <RocketText color="error" style={styles.errorText} variant="bodyMedium">
+                {error}
+              </RocketText>
+              <RocketButton
+                label="Retry"
+                onPress={() => loadFeed(false)}
+                size="sm"
+                style={styles.retryButton}
+                variant="outline"
+              />
+            </View>
+          ) : (
+            <RocketEmptyState
+              action={
+                <View style={styles.emptyActions}>
+                  <RocketButton
+                    label="Share a post"
+                    onPress={() => router.push('/create-post')}
+                    size="md"
+                    variant="primary"
+                  />
+                  <RocketButton
+                    label="Find friends"
+                    onPress={() => router.push('/friends')}
+                    size="md"
+                    style={styles.secondaryCta}
+                    variant="ghost"
+                  />
+                </View>
+              }
+              body="Share a photo or thought, or connect with friends to see their updates here."
+              title="Your orbit is quiet"
+            />
+          )
+        }
+      />
+    </RocketScreen>
+  );
 }
 
-const page = StyleSheet.create({ header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 5 }, greeting: { marginTop: 30, marginBottom: 27 }, eyebrow: { color: colors.accent, fontSize: 10, fontWeight: '800', letterSpacing: 1.4, marginBottom: 7 }, title: { color: colors.text, fontSize: 27, fontWeight: '900' }, subtitle: { color: colors.textSecondary, fontSize: 14, marginTop: 7 }, bell: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.backgroundElement, alignItems: 'center', justifyContent: 'center' }, bellText: { color: colors.text, fontSize: 25, lineHeight: 25 }, dot: { position: 'absolute', width: 7, height: 7, borderRadius: 4, backgroundColor: colors.accent, right: 8, top: 8 }, state: { alignItems: 'center', paddingVertical: 50 }, stateText: { color: colors.textSecondary, marginTop: 9, fontSize: 13 }, error: { color: colors.accent, textAlign: 'center', fontSize: 13 }, empty: { alignItems: 'center', padding: 28 }, emptyTitle: { color: colors.text, fontSize: 17, fontWeight: '800' }, emptyBody: { color: colors.textSecondary, fontSize: 13, marginTop: 7 }, missing: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28 }, missingTitle: { color: colors.text, fontSize: 20, fontWeight: '800' }, missingBody: { color: colors.textSecondary, textAlign: 'center', marginTop: 8 } });
+const styles = StyleSheet.create({
+  screenContent: {
+    paddingHorizontal: 0,
+    flex: 1,
+  },
+  listContent: {
+    paddingHorizontal: SpacingScale.xl,
+    paddingBottom: SpacingScale.huge,
+  },
+  headerContainer: {
+    paddingTop: SpacingScale.sm,
+    marginBottom: SpacingScale.lg,
+  },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: SpacingScale.xl,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SpacingScale.md,
+  },
+  createGlyph: {
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  avatarPressable: {
+    borderRadius: 999,
+  },
+  greetingSection: {
+    marginBottom: SpacingScale.xl,
+  },
+  dateEyebrow: {
+    marginBottom: SpacingScale.xs,
+    letterSpacing: 1.2,
+  },
+  greetingTitle: {
+    fontSize: 26,
+    lineHeight: 32,
+    letterSpacing: -0.6,
+  },
+  greetingSubtitle: {
+    marginTop: SpacingScale.xs,
+    lineHeight: 20,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: SpacingScale.xs,
+  },
+  sectionTitle: {
+    letterSpacing: -0.3,
+  },
+  stateContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: SpacingScale.epic,
+  },
+  stateText: {
+    marginTop: SpacingScale.sm,
+  },
+  errorText: {
+    textAlign: 'center',
+    marginBottom: SpacingScale.md,
+  },
+  retryButton: {
+    alignSelf: 'center',
+    minWidth: 120,
+  },
+  emptyActions: {
+    gap: SpacingScale.sm,
+    width: '100%',
+  },
+  secondaryCta: {
+    marginTop: SpacingScale.xs,
+  },
+});

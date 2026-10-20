@@ -15,9 +15,21 @@ export function getAuthErrorMessage(error: unknown): string {
     case 'auth/missing-password':
       return 'Enter your password to continue.';
     case 'auth/weak-password':
-      return 'Choose a stronger password with at least 6 characters.';
+      return 'Choose a stronger password with at least 8 characters.';
     case 'auth/email-already-in-use':
-      return 'An account already exists with this email.';
+    case 'auth/credential-already-in-use':
+    case 'auth/account-exists-with-different-credential':
+      return 'An account already exists with this email. Sign in using its existing method; accounts are not merged automatically.';
+    case 'auth/provider-already-linked':
+      return 'This sign-in method is already linked to your account. Confirm your existing password and try again.';
+    case 'auth/requires-recent-login':
+      return 'For your security, sign in again and retry this action.';
+    case 'auth/expired-action-code':
+    case 'auth/invalid-action-code':
+      return 'This verification link has expired or is invalid. Request a new verification email.';
+    case 'auth/invalid-continue-uri':
+    case 'auth/unauthorized-continue-uri':
+      return 'Firebase email-action link settings are not configured for this app. Contact support.';
     case 'auth/invalid-credential':
     case 'auth/user-not-found':
     case 'auth/wrong-password':

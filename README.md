@@ -54,3 +54,23 @@ Join our community of developers creating universal apps.
 
 - [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
 - [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+
+## Notifications and release prerequisites
+
+Rocket now has client-side notification permission/settings, Android message/call/social
+channels, local device-token storage, foreground notification handling, and validated
+notification-to-screen routing. Device tokens are stored only on this device; Rocket
+does not currently send them to Firebase or another push service. Background push
+delivery is therefore not implemented.
+
+Real Firebase push delivery requires an approved Firestore token-registration schema
+and security rules, Android FCM and iOS APNs credentials, and a trusted Firebase
+backend sender (for example, Cloud Functions triggered by message, call, and social
+activity writes). The backend must honor per-user preferences and remove invalid
+tokens. Do not put Firebase Admin credentials in the app.
+
+Email verification is enforced by the Rocket client before it exposes signed-in
+screens. Firestore rules currently do not check the `email_verified` claim, so a
+project-level guarantee against direct API access requires an approved rules update.
+Notification and image-picker config changes also require a native rebuild before
+they take effect in a standalone app.

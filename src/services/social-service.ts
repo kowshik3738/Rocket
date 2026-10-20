@@ -14,7 +14,8 @@ import {
 } from 'firebase/firestore';
 
 import { db } from '@/lib/firebase';
-import { getUserProfile, UserProfile } from '@/services/user-service';
+import { dispatchPushNotification } from '@/services/notification-service';
+import { getUserProfile, isValidProfilePhotoUrl, UserProfile } from '@/services/user-service';
 
 export type FriendRequestStatus = 'pending' | 'accepted' | 'declined';
 export type RelationshipStatus = 'add' | 'sent' | 'incoming' | 'friends' | 'blocked';
@@ -61,6 +62,9 @@ function profileFromSnapshot(snapshot: { id: string; data: () => Record<string, 
     username: data.username as string,
     usernameLower: data.usernameLower as string,
     bio: (data.bio as string | undefined) ?? '',
+    photoUrl: typeof data.photoUrl === 'string' && isValidProfilePhotoUrl(data.photoUrl)
+      ? data.photoUrl
+      : undefined,
     createdAt: (data.createdAt as Timestamp | undefined) ?? null,
   };
 }
@@ -189,6 +193,7 @@ export async function sendFriendRequest(senderId: string, recipientId: string): 
       if (outgoing.data().status === 'declined') {
         transaction.update(outgoingRef, {
           status: 'pending',
+          createdAt: serverTimestamp(),
           declinedAt: deleteField(),
         });
         return;
@@ -202,6 +207,16 @@ export async function sendFriendRequest(senderId: string, recipientId: string): 
       status: 'pending',
       createdAt: serverTimestamp(),
     });
+  });
+
+  void dispatchPushNotification({
+    recipientUid: recipientId,
+    kind: 'social',
+    data: {
+      subkind: 'friend_request',
+    },
+  }).catch((err) => {
+    console.warn(`[Push] Failed to dispatch friend request notification to ${recipientId}:`, err);
   });
 }
 
@@ -276,6 +291,16 @@ export async function acceptFriendRequest(request: FriendRequest, currentUid: st
         requestId: request.id,
         createdAt: serverTimestamp(),
       });
+    });
+
+    void dispatchPushNotification({
+      recipientUid: request.senderId,
+      kind: 'social',
+      data: {
+        subkind: 'friend_accepted',
+      },
+    }).catch((err) => {
+      console.warn(`[Push] Failed to dispatch friend accepted notification to ${request.senderId}:`, err);
     });
   } catch (error) {
     throw error;
